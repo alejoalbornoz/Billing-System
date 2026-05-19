@@ -1,4 +1,4 @@
-package com.afip_soap_server.afip_soap_server;
+package com.afip.soap.server;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;

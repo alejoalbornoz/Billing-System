@@ -112,6 +112,30 @@
                 </configuration>
             </plugin>
 
+            <!-- Generates Java classes from XSD automatically -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>jaxb2-maven-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>xjc</id>
+                        <goals>
+                            <goal>xjc</goal>
+                        </goals>
+                    </execution>
+                </executions>
+                <configuration>
+                    <!-- Where the XSD file is -->
+                    <sources>
+                        <source>src/main/resources/xsd/afip-invoice.xsd</source>
+                    </sources>
+                    <!-- Where the generated classes will be placed -->
+                    <outputDirectory>${project.build.directory}/generated-sources/jaxb</outputDirectory>
+                    <clearOutputDir>false</clearOutputDir>
+                </configuration>
+            </plugin>
+
         </plugins>
     </build>
 
