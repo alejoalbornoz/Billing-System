@@ -80,6 +80,10 @@ spring.jpa.properties.hibernate.jdbc.time_zone=UTC
 # AFIP SOAP
 afip.soap.url=http://localhost:8081/ws/invoice
 afip.soap.wsdl=http://localhost:8081/ws/invoice.wsdl
+
+# Swagger
+springdoc.swagger-ui.path=/swagger-ui.html
+springdoc.api-docs.path=/v3/api-docs
 ```
 
 ### `afip-soap-server` — application.properties
@@ -106,7 +110,7 @@ afip.cae.length=14
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/your-username/billing-system.git
+git clone https://github.com/alejoalbornoz/Billing-System
 
 # 2. Start PostgreSQL and pgAdmin containers (inside billing-client folder)
 cd billing-client
