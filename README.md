@@ -9,6 +9,7 @@ A hybrid REST + SOAP billing system inspired by AFIP (Argentina's tax authority)
 - **Java 17**
 - **Spring Boot 3.4.5**
 - **Spring Web Services (SOAP)**
+- **Spring Security + JWT**
 - **Spring Data JPA + Hibernate**
 - **PostgreSQL 15**
 - **JAXB (XML Binding)**
@@ -39,6 +40,7 @@ REST Client (Postman)
 Simulates a company that wants to issue invoices.
 
 Responsibilities:
+- Authenticate users via JWT and enforce role-based access
 - Receive REST requests
 - Save invoice as `PENDING` in PostgreSQL
 - Build and send SOAP XML to AFIP
@@ -80,6 +82,10 @@ spring.jpa.properties.hibernate.jdbc.time_zone=UTC
 # AFIP SOAP
 afip.soap.url=http://localhost:8081/ws/invoice
 afip.soap.wsdl=http://localhost:8081/ws/invoice.wsdl
+
+# JWT
+jwt.secret=your_secret_key_min_64_characters_long_replace_in_production
+jwt.expiration=86400000
 
 # Swagger
 springdoc.swagger-ui.path=/swagger-ui.html
@@ -154,11 +160,88 @@ Password: admin123
 Connect to the PostgreSQL server with:
 
 ```
-Host:     localhost
+Host:     postgres
 Port:     5432
 Database: billing_db
 Username: billing_user
 Password: billing_pass
+```
+
+---
+
+## 🔐 Authentication
+
+The API uses **JWT (JSON Web Tokens)** for authentication. Tokens expire after **24 hours**.
+
+### Roles
+
+| Role | Access |
+|------|--------|
+| `ADMIN` | Full access — submit invoices, view all invoices, register new users |
+| `ACCOUNTANT` | Submit invoices and view invoice details |
+
+### Initial Setup
+
+Insert the first ADMIN user directly in the database. The password must be encrypted with BCrypt (use [bcrypt-generator.com](https://bcrypt-generator.com) with 10 rounds):
+
+```sql
+INSERT INTO users (first_name, last_name, email, password, role, active, created_at)
+VALUES (
+    'Admin',
+    'User',
+    'admin@billing.com',
+    '$2a$10$your_bcrypt_hashed_password',
+    'ADMIN',
+    true,
+    NOW()
+);
+```
+
+### Login
+
+```
+POST /api/auth/login
+Content-Type: application/json
+
+{
+    "email": "admin@billing.com",
+    "password": "yourpassword"
+}
+```
+
+Response:
+
+```json
+{
+    "token": "eyJhbGciOiJIUzM4NCJ9...",
+    "type": "Bearer",
+    "userId": 1,
+    "firstName": "Admin",
+    "lastName": "User",
+    "email": "admin@billing.com",
+    "role": "ADMIN"
+}
+```
+
+Use the token in every subsequent request:
+```
+Authorization: Bearer eyJhbGciOiJIUzM4NCJ9...
+```
+
+### Register (ADMIN only)
+
+```
+POST /api/auth/register
+Authorization: Bearer eyJhbGciOiJIUzM4NCJ9...
+Content-Type: application/json
+
+{
+    "firstName": "Juan",
+    "lastName": "Pérez",
+    "email": "juan@billing.com",
+    "password": "securepassword",
+    "role": "ACCOUNTANT"
+}
 ```
 
 ---
@@ -196,14 +279,21 @@ http://localhost:8081/ws/invoice.wsdl
 
 ## 📋 API Endpoints
 
+### Auth
+
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| `POST` | `/api/auth/login` | Public | Login and get JWT token |
+| `POST` | `/api/auth/register` | ADMIN only | Register a new user |
+
 ### Invoices
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/invoices` | Submit invoice to AFIP for authorization |
-| `GET` | `/api/v1/invoices` | Get all invoices |
-| `GET` | `/api/v1/invoices/{id}` | Get invoice by internal ID |
-| `GET` | `/api/v1/invoices/external/{externalInvoiceId}` | Get invoice by AFIP external ID |
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| `POST` | `/api/v1/invoices` | ADMIN, ACCOUNTANT | Submit invoice to AFIP for authorization |
+| `GET` | `/api/v1/invoices` | ADMIN | Get all invoices |
+| `GET` | `/api/v1/invoices/{id}` | ADMIN, ACCOUNTANT | Get invoice by internal ID |
+| `GET` | `/api/v1/invoices/external/{externalInvoiceId}` | ADMIN, ACCOUNTANT | Get invoice by AFIP external ID |
 
 ### Create Invoice — Request Body
 
@@ -316,6 +406,30 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 
 ---
 
+## 🧪 Testing
+
+```bash
+# Run all tests
+./mvnw test
+```
+
+| Project | Test Class | Coverage |
+|---------|-----------|----------|
+| `afip-soap-server` | `InvoiceValidatorTest` | 11 unit tests — all validation rules |
+| `afip-soap-server` | `CaeGeneratorServiceImplTest` | 8 unit tests — approved and rejected flows |
+| `billing-client` | `InvoiceControllerTest` | 8 integration tests — REST endpoints with MockMvc |
+
+---
+
+## 📖 API Documentation
+
+Swagger UI is available at:
+```
+http://localhost:8080/swagger-ui.html
+```
+
+---
+
 ## 🧠 Design Decisions
 
 **Two independent applications** — Separating the client and the AFIP mock into two Spring Boot apps makes the architecture realistic and professional. Each app has its own responsibility and can be deployed independently.
@@ -327,6 +441,8 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 **Interface + Implementation pattern on services** — Every service is defined as an interface (`InvoiceService`) and implemented separately (`InvoiceServiceImpl`). Controllers always inject the interface, making the implementation swappable without touching the controller layer.
 
 **CUIT format validation in both layers** — The REST layer validates format with `@Pattern` before the request reaches the service. The SOAP server re-validates independently, simulating real AFIP behavior where the server enforces its own rules regardless of the client.
+
+**JWT stateless authentication** — Spring Security is configured as stateless — no HTTP sessions are created. Every request must carry its own JWT token, which is validated by the `JwtAuthFilter` before reaching any controller.
 
 **XMLGregorianCalendar for SOAP dates** — JAXB maps `xs:date` and `xs:dateTime` to `XMLGregorianCalendar`. Conversion helpers centralize the `LocalDate`/`LocalDateTime` → `XMLGregorianCalendar` logic to keep the service code clean.
 
