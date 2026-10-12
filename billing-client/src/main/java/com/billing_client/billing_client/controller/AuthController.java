@@ -3,7 +3,7 @@ package com.billing_client.billing_client.controller;
 import com.billing_client.billing_client.dto.request.LoginRequestDTO;
 import com.billing_client.billing_client.dto.request.RegisterRequestDTO;
 import com.billing_client.billing_client.dto.response.AuthResponseDTO;
-import com.billing_client.billing_client.service.impl.AuthServiceImpl;
+import com.billing_client.billing_client.service.IAuthService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,7 +21,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class AuthController {
 
-    private final AuthServiceImpl authService;
+    private final IAuthService authService;
 
     @PostMapping("/login")
     public ResponseEntity<AuthResponseDTO> login(@Valid @RequestBody LoginRequestDTO request) {

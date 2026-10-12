@@ -9,7 +9,6 @@ import com.billing_client.billing_client.exception.InvoiceNotFoundException;
 import com.billing_client.billing_client.model.enums.InvoiceStatus;
 import com.billing_client.billing_client.model.enums.InvoiceType;
 import com.billing_client.billing_client.model.enums.VatRate;
-import com.billing_client.billing_client.security.JwtAuthFilter;
 import com.billing_client.billing_client.security.JwtService;
 import com.billing_client.billing_client.security.SecurityConfig;
 import com.billing_client.billing_client.service.InvoiceService;
@@ -20,7 +19,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
@@ -35,13 +33,19 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-//@AutoConfigureMockMvc(addFilters = false)
+/*
+ * JwtAuthFilter is NOT mocked on purpose: a mocked filter never calls
+ * chain.doFilter(), so requests would stop before reaching the controller.
+ * The real filter just passes through when there is no Authorization header,
+ * and @WithMockUser provides the authenticated user.
+ */
 @WebMvcTest(InvoiceController.class)
 @Import(SecurityConfig.class)
 @DisplayName("InvoiceController Tests")
@@ -58,9 +62,6 @@ class InvoiceControllerTest {
 
     @MockitoBean
     private UserDetailsServiceImpl userDetailsService;
-
-    @MockitoBean
-    private JwtAuthFilter jwtAuthFilter;
 
     private ObjectMapper objectMapper;
     private InvoiceRequestDTO validRequest;
@@ -130,6 +131,53 @@ class InvoiceControllerTest {
                         .content(objectMapper.writeValueAsString(validRequest)))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.fieldErrors.totalAmount").exists());
+    }
+
+    @Test
+    @DisplayName("Should return 400 when invoiceType is not a valid enum value")
+    @WithMockUser(roles = "ADMIN")
+    void shouldReturn400_whenInvoiceTypeIsUnknown() throws Exception {
+        String body = objectMapper.writeValueAsString(validRequest)
+                .replace("\"INVOICE_B\"", "\"INVOICE_X\"");
+
+        mockMvc.perform(post("/api/v1/invoices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Malformed Request"))
+                .andExpect(jsonPath("$.message").value(containsString("invoiceType")))
+                .andExpect(jsonPath("$.message").value(containsString("INVOICE_A")));
+    }
+
+    @Test
+    @DisplayName("Should return 400 when request body is not valid JSON")
+    @WithMockUser(roles = "ADMIN")
+    void shouldReturn400_whenBodyIsMalformedJson() throws Exception {
+        mockMvc.perform(post("/api/v1/invoices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{ not json"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Malformed Request"));
+    }
+
+    @Test
+    @DisplayName("Should return 400 when invoice ID is not a number")
+    @WithMockUser(roles = "ADMIN")
+    void shouldReturn400_whenInvoiceIdIsNotANumber() throws Exception {
+        mockMvc.perform(get("/api/v1/invoices/abc"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+    }
+
+    @Test
+    @DisplayName("Should return 401 when request has no token")
+    @WithAnonymousUser
+    void shouldReturn401_whenRequestIsAnonymous() throws Exception {
+        mockMvc.perform(get("/api/v1/invoices"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.error").value("Unauthorized"));
+
+        verifyNoInteractions(invoiceService);
     }
 
 

@@ -9,7 +9,9 @@ A hybrid REST + SOAP billing system inspired by AFIP (Argentina's tax authority)
 - **Java 17**
 - **Spring Boot 3.4.5**
 - **Spring Web Services (SOAP)**
+- **Spring Security + JWT (jjwt)**
 - **Spring Data JPA + Hibernate**
+- **springdoc-openapi (Swagger UI)**
 - **PostgreSQL 15**
 - **JAXB (XML Binding)**
 - **Lombok**
@@ -112,18 +114,21 @@ afip.cae.length=14
 # 1. Clone the repository
 git clone https://github.com/alejoalbornoz/Billing-System
 
-# 2. Start PostgreSQL and pgAdmin containers (inside billing-client folder)
-cd billing-client
+# 2. Start PostgreSQL and pgAdmin containers
+cd Billing-System/billing-client
 docker-compose up -d
 
 # 3. Run afip-soap-server first (port 8081)
-cd afip-soap-server
+cd ../afip-soap-server
 ./mvnw spring-boot:run
 
-# 4. Run billing-client (port 8080)
-cd billing-client
+# 4. In another terminal, run billing-client (port 8080)
+cd Billing-System/billing-client
 ./mvnw spring-boot:run
 ```
+
+On first startup `billing-client` creates an admin user (see [Authentication](#-authentication)).
+Open Swagger UI at `http://localhost:8080/swagger-ui.html`, call `POST /api/auth/login`, then click **Authorize** and paste the token.
 
 ### Stop containers
 
@@ -194,7 +199,67 @@ http://localhost:8081/ws/invoice.wsdl
 
 ---
 
+## 🔐 Authentication
+
+All `/api/v1/**` endpoints require a JWT sent as `Authorization: Bearer <token>`.
+
+| Role | Can do |
+|------|--------|
+| `ADMIN` | Everything, including registering new users |
+| `ACCOUNTANT` | Submit and view invoices |
+
+### Initial admin
+
+Since only an `ADMIN` can register users, `billing-client` creates one on startup when no admin exists yet:
+
+```
+Email:    admin@billing.com
+Password: admin12345
+```
+
+Override them with the `ADMIN_EMAIL` and `ADMIN_PASSWORD` environment variables.
+
+### Login
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+    "email": "admin@billing.com",
+    "password": "admin12345"
+}
+```
+
+```json
+{
+    "token": "eyJhbGciOiJIUzUxMiJ9...",
+    "type": "Bearer",
+    "userId": 1,
+    "firstName": "System",
+    "lastName": "Administrator",
+    "email": "admin@billing.com",
+    "role": "ADMIN"
+}
+```
+
+### Security errors
+
+| Status | When |
+|--------|------|
+| `401 Unauthorized` | Missing, invalid or expired token — or wrong email/password on login |
+| `403 Forbidden` | Valid token but the role is not allowed (e.g. `ACCOUNTANT` calling `/register`) |
+
+---
+
 ## 📋 API Endpoints
+
+### Auth
+
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| `POST` | `/api/auth/login` | Public | Returns a JWT |
+| `POST` | `/api/auth/register` | `ADMIN` | Creates a user with role `ADMIN` or `ACCOUNTANT` |
 
 ### Invoices
 
@@ -290,6 +355,17 @@ Returns `400 BAD REQUEST` on failure:
         "issuerCuit": "Issuer CUIT format must be XX-XXXXXXXX-X"
     },
     "timestamp": "2026-05-25T18:39:17"
+}
+```
+
+A body that can't be parsed (malformed JSON, unknown enum value, text in a numeric field) also returns `400`, pointing at the field:
+
+```json
+{
+    "status": 400,
+    "error": "Malformed Request",
+    "message": "Invalid value for field 'invoiceType'. Accepted values: [INVOICE_A, INVOICE_B, INVOICE_C, CREDIT_NOTE, DEBIT_NOTE]",
+    "timestamp": "2026-05-25T18:40:02"
 }
 ```
 
