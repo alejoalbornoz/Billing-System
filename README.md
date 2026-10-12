@@ -41,6 +41,7 @@ REST Client (Postman)
 Simulates a company that wants to issue invoices.
 
 Responsibilities:
+- Authenticate users via JWT and enforce role-based access
 - Receive REST requests
 - Save invoice as `PENDING` in PostgreSQL
 - Build and send SOAP XML to AFIP
@@ -82,6 +83,10 @@ spring.jpa.properties.hibernate.jdbc.time_zone=UTC
 # AFIP SOAP
 afip.soap.url=http://localhost:8081/ws/invoice
 afip.soap.wsdl=http://localhost:8081/ws/invoice.wsdl
+
+# JWT
+jwt.secret=your_secret_key_min_64_characters_long_replace_in_production
+jwt.expiration=86400000
 
 # Swagger
 springdoc.swagger-ui.path=/swagger-ui.html
@@ -128,7 +133,6 @@ cd Billing-System/billing-client
 ```
 
 On first startup `billing-client` creates an admin user (see [Authentication](#-authentication)).
-Open Swagger UI at `http://localhost:8080/swagger-ui.html`, call `POST /api/auth/login`, then click **Authorize** and paste the token.
 
 ### Stop containers
 
@@ -159,12 +163,91 @@ Password: admin123
 Connect to the PostgreSQL server with:
 
 ```
-Host:     localhost
+Host:     postgres
 Port:     5432
 Database: billing_db
 Username: billing_user
 Password: billing_pass
 ```
+
+---
+
+## 🔐 Authentication
+
+The API uses **JWT (JSON Web Tokens)** for authentication. Tokens expire after **24 hours**.
+All `/api/v1/**` endpoints require the token sent as `Authorization: Bearer <token>`.
+
+### Roles
+
+| Role | Access |
+|------|--------|
+| `ADMIN` | Full access — submit invoices, view all invoices, register new users |
+| `ACCOUNTANT` | Submit invoices and view invoice details |
+
+### Initial admin
+
+Since only an `ADMIN` can register users, `billing-client` creates one on startup when no admin exists yet:
+
+```
+Email:    admin@billing.com
+Password: admin12345
+```
+
+Override them with the `ADMIN_EMAIL` and `ADMIN_PASSWORD` environment variables.
+
+### Login
+
+```
+POST /api/auth/login
+Content-Type: application/json
+
+{
+    "email": "admin@billing.com",
+    "password": "admin12345"
+}
+```
+
+Response:
+
+```json
+{
+    "token": "eyJhbGciOiJIUzM4NCJ9...",
+    "type": "Bearer",
+    "userId": 1,
+    "firstName": "System",
+    "lastName": "Administrator",
+    "email": "admin@billing.com",
+    "role": "ADMIN"
+}
+```
+
+Use the token in every subsequent request:
+```
+Authorization: Bearer eyJhbGciOiJIUzM4NCJ9...
+```
+
+### Register (ADMIN only)
+
+```
+POST /api/auth/register
+Authorization: Bearer eyJhbGciOiJIUzM4NCJ9...
+Content-Type: application/json
+
+{
+    "firstName": "Juan",
+    "lastName": "Pérez",
+    "email": "juan@billing.com",
+    "password": "securepassword",
+    "role": "ACCOUNTANT"
+}
+```
+
+### Security errors
+
+| Status | When |
+|--------|------|
+| `401 Unauthorized` | Missing, invalid or expired token — or wrong email/password on login |
+| `403 Forbidden` | Valid token but the role is not allowed (e.g. `ACCOUNTANT` calling `/register`) |
 
 ---
 
@@ -199,76 +282,23 @@ http://localhost:8081/ws/invoice.wsdl
 
 ---
 
-## 🔐 Authentication
-
-All `/api/v1/**` endpoints require a JWT sent as `Authorization: Bearer <token>`.
-
-| Role | Can do |
-|------|--------|
-| `ADMIN` | Everything, including registering new users |
-| `ACCOUNTANT` | Submit and view invoices |
-
-### Initial admin
-
-Since only an `ADMIN` can register users, `billing-client` creates one on startup when no admin exists yet:
-
-```
-Email:    admin@billing.com
-Password: admin12345
-```
-
-Override them with the `ADMIN_EMAIL` and `ADMIN_PASSWORD` environment variables.
-
-### Login
-
-```http
-POST /api/auth/login
-Content-Type: application/json
-
-{
-    "email": "admin@billing.com",
-    "password": "admin12345"
-}
-```
-
-```json
-{
-    "token": "eyJhbGciOiJIUzUxMiJ9...",
-    "type": "Bearer",
-    "userId": 1,
-    "firstName": "System",
-    "lastName": "Administrator",
-    "email": "admin@billing.com",
-    "role": "ADMIN"
-}
-```
-
-### Security errors
-
-| Status | When |
-|--------|------|
-| `401 Unauthorized` | Missing, invalid or expired token — or wrong email/password on login |
-| `403 Forbidden` | Valid token but the role is not allowed (e.g. `ACCOUNTANT` calling `/register`) |
-
----
-
 ## 📋 API Endpoints
 
 ### Auth
 
 | Method | Endpoint | Access | Description |
 |--------|----------|--------|-------------|
-| `POST` | `/api/auth/login` | Public | Returns a JWT |
-| `POST` | `/api/auth/register` | `ADMIN` | Creates a user with role `ADMIN` or `ACCOUNTANT` |
+| `POST` | `/api/auth/login` | Public | Login and get JWT token |
+| `POST` | `/api/auth/register` | ADMIN only | Register a new user (`ADMIN` or `ACCOUNTANT`) |
 
 ### Invoices
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/invoices` | Submit invoice to AFIP for authorization |
-| `GET` | `/api/v1/invoices` | Get all invoices |
-| `GET` | `/api/v1/invoices/{id}` | Get invoice by internal ID |
-| `GET` | `/api/v1/invoices/external/{externalInvoiceId}` | Get invoice by AFIP external ID |
+| Method | Endpoint | Access | Description |
+|--------|----------|--------|-------------|
+| `POST` | `/api/v1/invoices` | ADMIN, ACCOUNTANT | Submit invoice to AFIP for authorization |
+| `GET` | `/api/v1/invoices` | ADMIN | Get all invoices |
+| `GET` | `/api/v1/invoices/{id}` | ADMIN, ACCOUNTANT | Get invoice by internal ID |
+| `GET` | `/api/v1/invoices/external/{externalInvoiceId}` | ADMIN, ACCOUNTANT | Get invoice by AFIP external ID |
 
 ### Create Invoice — Request Body
 
@@ -392,6 +422,36 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 
 ---
 
+## 🧪 Testing
+
+```bash
+# Run inside each project folder (afip-soap-server / billing-client)
+./mvnw test
+```
+
+| Project | Test Class | Coverage |
+|---------|-----------|----------|
+| `afip-soap-server` | `InvoiceValidatorTest` | 13 unit tests — all validation rules |
+| `afip-soap-server` | `CaeGeneratorServiceImplTest` | 8 unit tests — approved and rejected flows |
+| `billing-client` | `InvoiceControllerTest` | 12 integration tests — REST endpoints, validation and error responses with MockMvc |
+| `billing-client` | `AuthControllerTest` | 7 integration tests — login, register and 401/403/409 responses |
+| `billing-client` | `AdminInitializerTest` | 2 unit tests — initial admin creation |
+
+`BillingClientApplicationTests` loads the full context, so it needs PostgreSQL running (`docker-compose up -d`).
+
+---
+
+## 📖 API Documentation
+
+Swagger UI is available at:
+```
+http://localhost:8080/swagger-ui.html
+```
+
+Call `POST /api/auth/login`, click **Authorize** and paste the token to try the protected endpoints.
+
+---
+
 ## 🧠 Design Decisions
 
 **Two independent applications** — Separating the client and the AFIP mock into two Spring Boot apps makes the architecture realistic and professional. Each app has its own responsibility and can be deployed independently.
@@ -403,6 +463,8 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 **Interface + Implementation pattern on services** — Every service is defined as an interface (`InvoiceService`) and implemented separately (`InvoiceServiceImpl`). Controllers always inject the interface, making the implementation swappable without touching the controller layer.
 
 **CUIT format validation in both layers** — The REST layer validates format with `@Pattern` before the request reaches the service. The SOAP server re-validates independently, simulating real AFIP behavior where the server enforces its own rules regardless of the client.
+
+**JWT stateless authentication** — Spring Security is configured as stateless — no HTTP sessions are created. Every request must carry its own JWT token, which is validated by the `JwtAuthFilter` before reaching any controller.
 
 **XMLGregorianCalendar for SOAP dates** — JAXB maps `xs:date` and `xs:dateTime` to `XMLGregorianCalendar`. Conversion helpers centralize the `LocalDate`/`LocalDateTime` → `XMLGregorianCalendar` logic to keep the service code clean.
 
