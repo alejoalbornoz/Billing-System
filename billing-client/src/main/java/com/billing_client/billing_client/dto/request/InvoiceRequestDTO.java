@@ -8,7 +8,6 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -57,24 +56,10 @@ public class InvoiceRequestDTO {
     //  ITEMS
     // ─────────────────────────────────────────────
 
+    // Net, VAT and total amounts are not part of the request:
+    // they are calculated from the items (see Invoice.calculateTotals).
     @NotNull(message = "Items list is required.")
     @Size(min = 1, message = "Invoice must contain at least one item.")
     @Valid  // triggers validation on each InvoiceItemRequestDTO inside the list
     private List<InvoiceItemRequestDTO> items;
-
-    // ─────────────────────────────────────────────
-    //  AMOUNTS
-    // ─────────────────────────────────────────────
-
-    @NotNull(message = "Net amount is required.")
-    @DecimalMin(value = "0.01", message = "Net amount must be greater than zero.")
-    private BigDecimal netAmount;
-
-    @NotNull(message = "VAT amount is required.")
-    @DecimalMin(value = "0.00", message = "VAT amount cannot be negative.")
-    private BigDecimal vatAmount;
-
-    @NotNull(message = "Total amount is required.")
-    @DecimalMin(value = "0.01", message = "Total amount must be greater than zero.")
-    private BigDecimal totalAmount;
 }

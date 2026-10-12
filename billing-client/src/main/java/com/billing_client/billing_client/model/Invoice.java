@@ -3,14 +3,19 @@ package com.billing_client.billing_client.model;
 
 import com.billing_client.billing_client.model.enums.InvoiceType;
 import com.billing_client.billing_client.model.enums.InvoiceStatus;
+import com.billing_client.billing_client.model.enums.VatRate;
 import jakarta.persistence.*;
 import lombok.*;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Entity
 @Table(name = "invoices")
@@ -145,4 +150,34 @@ public class Invoice {
             orphanRemoval = true, fetch = FetchType.LAZY)
     @Builder.Default
     private List<InvoiceItem> items = new ArrayList<>();
+
+    // ─────────────────────────────────────────────
+    //  AMOUNT CALCULATION
+    // ─────────────────────────────────────────────
+
+    /**
+     * Calculates net, VAT and total amounts from the items.
+     *
+     * VAT is calculated once per rate over the sum of the subtotals with that rate
+     * (the same breakdown AFIP expects), not item by item, so rounding differences
+     * don't accumulate across items.
+     */
+    public void calculateTotals() {
+        Map<VatRate, BigDecimal> taxableBaseByRate = items.stream()
+                .collect(Collectors.groupingBy(
+                        InvoiceItem::getVatRate,
+                        () -> new EnumMap<>(VatRate.class),
+                        Collectors.reducing(BigDecimal.ZERO, InvoiceItem::getSubtotal, BigDecimal::add)));
+
+        this.netAmount = taxableBaseByRate.values().stream()
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(2, RoundingMode.HALF_UP);
+
+        this.vatAmount = taxableBaseByRate.entrySet().stream()
+                .map(entry -> entry.getKey().vatFor(entry.getValue()))
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(2, RoundingMode.HALF_UP);
+
+        this.totalAmount = netAmount.add(vatAmount);
+    }
 }

@@ -120,17 +120,44 @@ class InvoiceControllerTest {
     }
 
     @Test
-    @DisplayName("Should return 400 when totalAmount is null")
+    @DisplayName("Should return 400 when an item quantity is zero")
     @WithMockUser(roles = "ADMIN")
-    void shouldReturn400_whenTotalAmountIsNull() throws Exception {
-        validRequest.setTotalAmount(null);
+    void shouldReturn400_whenItemQuantityIsZero() throws Exception {
+        validRequest.getItems().get(0).setQuantity(BigDecimal.ZERO);
 
         mockMvc.perform(post("/api/v1/invoices")
-                        .with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(validRequest)))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.fieldErrors.totalAmount").exists());
+                .andExpect(jsonPath("$.fieldErrors['items[0].quantity']").exists());
+    }
+
+    @Test
+    @DisplayName("Should return 400 when an item unit price has more than 2 decimals")
+    @WithMockUser(roles = "ADMIN")
+    void shouldReturn400_whenUnitPriceHasMoreThanTwoDecimals() throws Exception {
+        validRequest.getItems().get(0).setUnitPrice(new BigDecimal("10.555"));
+
+        mockMvc.perform(post("/api/v1/invoices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(validRequest)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors['items[0].unitPrice']").exists());
+    }
+
+    @Test
+    @DisplayName("Should return 202 when AFIP is unreachable and the invoice stays PENDING")
+    @WithMockUser(roles = "ACCOUNTANT")
+    void shouldReturn202_whenInvoiceStaysPending() throws Exception {
+        approvedResponse.setStatus(InvoiceStatus.PENDING);
+        approvedResponse.setCae(null);
+        when(invoiceService.processInvoice(any())).thenReturn(approvedResponse);
+
+        mockMvc.perform(post("/api/v1/invoices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(validRequest)))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.status").value("PENDING"));
     }
 
     @Test
@@ -218,6 +245,16 @@ class InvoiceControllerTest {
     }
 
     @Test
+    @DisplayName("Should return 403 when an ACCOUNTANT lists all invoices")
+    @WithMockUser(roles = "ACCOUNTANT")
+    void shouldReturn403_whenAccountantListsAllInvoices() throws Exception {
+        mockMvc.perform(get("/api/v1/invoices"))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(invoiceService);
+    }
+
+    @Test
     @DisplayName("Should return 200 when externalInvoiceId exists")
     @WithMockUser(roles = "ADMIN")
     void shouldReturn200_whenExternalInvoiceIdExists() throws Exception {
@@ -248,9 +285,6 @@ class InvoiceControllerTest {
                                 .vatRate(VatRate.VAT_21)
                                 .build()
                 ))
-                .netAmount(new BigDecimal("1000.00"))
-                .vatAmount(new BigDecimal("210.00"))
-                .totalAmount(new BigDecimal("1210.00"))
                 .build();
     }
 

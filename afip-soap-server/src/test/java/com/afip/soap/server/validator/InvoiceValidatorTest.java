@@ -177,6 +177,71 @@ class InvoiceValidatorTest {
     }
 
     // ─────────────────────────────────────────────
+    //  AMOUNTS vs ITEMS
+    // ─────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Should return ERR_019 when item subtotal is not quantity * unitPrice")
+    void shouldReturnErr019_whenItemSubtotalDoesNotMatch() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        request.getItems().getItem().get(0).setSubtotal(new BigDecimal("1.00"));
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").contains("ERR_019");
+    }
+
+    @Test
+    @DisplayName("Should reject amounts that are consistent with each other but not with the items")
+    void shouldReturnErr020AndErr021_whenAmountsDoNotMatchItems() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        // Items add up to 1000.00 + 21% VAT, but the invoice declares 1.00 + 0.21
+        request.setNetAmount(new BigDecimal("1.00"));
+        request.setVatAmount(new BigDecimal("0.21"));
+        request.setTotalAmount(new BigDecimal("1.21"));
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").containsExactly("ERR_020", "ERR_021");
+    }
+
+    @Test
+    @DisplayName("Should return only ERR_021 when VAT does not match the item rates")
+    void shouldReturnErr021_whenVatDoesNotMatchRates() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        // 10% instead of 21% — total is still net + VAT, so only the VAT check fails
+        request.setVatAmount(new BigDecimal("100.00"));
+        request.setTotalAmount(new BigDecimal("1100.00"));
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").containsExactly("ERR_021");
+    }
+
+    @Test
+    @DisplayName("Should accept an invoice with items of different VAT rates")
+    void shouldReturnNoErrors_whenItemsHaveMixedRates() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+
+        server.soap.afip.invoice.InvoiceItem book = new server.soap.afip.invoice.InvoiceItem();
+        book.setDescription("Libro técnico");
+        book.setQuantity(new BigDecimal("2"));
+        book.setUnitPrice(new BigDecimal("25.00"));
+        book.setVatRate(server.soap.afip.invoice.VatRate.VAT_10_5);
+        book.setSubtotal(new BigDecimal("50.00"));
+        request.getItems().getItem().add(book);
+
+        // 1000.00 @ 21% + 50.00 @ 10.5% → net 1050.00, VAT 210.00 + 5.25
+        request.setNetAmount(new BigDecimal("1050.00"));
+        request.setVatAmount(new BigDecimal("215.25"));
+        request.setTotalAmount(new BigDecimal("1265.25"));
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).isEmpty();
+    }
+
+    // ─────────────────────────────────────────────
     //  MULTIPLE ERRORS
     // ─────────────────────────────────────────────
 

@@ -5,12 +5,21 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 import org.springframework.ws.client.core.WebServiceTemplate;
+import org.springframework.ws.transport.http.HttpUrlConnectionMessageSender;
+
+import java.time.Duration;
 
 @Configuration
 public class SoapClientConfig {
 
     @Value("${afip.soap.url}")
     private String afipSoapUrl;
+
+    @Value("${afip.soap.connect-timeout-ms}")
+    private long connectTimeoutMs;
+
+    @Value("${afip.soap.read-timeout-ms}")
+    private long readTimeoutMs;
 
     /**
      * Jaxb2Marshaller handles the conversion between Java objects and XML.
@@ -41,6 +50,9 @@ public class SoapClientConfig {
      *
      * We inject the marshaller so it knows how to convert
      * Java objects to XML and back automatically.
+     *
+     * Timeouts are set explicitly: without them a hung AFIP server would block
+     * the request thread indefinitely instead of leaving the invoice PENDING.
      */
     @Bean
     public WebServiceTemplate webServiceTemplate(Jaxb2Marshaller jaxb2Marshaller) {
@@ -49,6 +61,11 @@ public class SoapClientConfig {
         template.setMarshaller(jaxb2Marshaller);
         template.setUnmarshaller(jaxb2Marshaller);
         template.setDefaultUri(afipSoapUrl);
+
+        HttpUrlConnectionMessageSender messageSender = new HttpUrlConnectionMessageSender();
+        messageSender.setConnectionTimeout(Duration.ofMillis(connectTimeoutMs));
+        messageSender.setReadTimeout(Duration.ofMillis(readTimeoutMs));
+        template.setMessageSender(messageSender);
 
         return template;
     }

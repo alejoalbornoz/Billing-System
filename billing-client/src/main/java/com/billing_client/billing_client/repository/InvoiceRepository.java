@@ -2,15 +2,27 @@ package com.billing_client.billing_client.repository;
 
 import com.billing_client.billing_client.model.Invoice;
 import com.billing_client.billing_client.model.enums.InvoiceStatus;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
 
 @Repository
 public interface InvoiceRepository extends JpaRepository<Invoice, Long> {
+
+    /**
+     * Finds invoices with the given status created before the cutoff.
+     * Used by the retry job to resend PENDING invoices.
+     *
+     * Items are fetched in the same query: the job runs outside a web request,
+     * so lazy loading would fail once the repository transaction ends.
+     */
+    @EntityGraph(attributePaths = "items")
+    List<Invoice> findByStatusAndCreatedAtBefore(InvoiceStatus status, LocalDateTime cutoff);
 
     /**
      * Finds an invoice by its external ID (the one sent to AFIP).

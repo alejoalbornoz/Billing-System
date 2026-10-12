@@ -43,17 +43,19 @@ Simulates a company that wants to issue invoices.
 Responsibilities:
 - Authenticate users via JWT and enforce role-based access
 - Receive REST requests
+- Calculate net, VAT and total amounts from the items
 - Save invoice as `PENDING` in PostgreSQL
 - Build and send SOAP XML to AFIP
 - Update invoice with AFIP response
 - Return approved or rejected invoice
+- Resend invoices left `PENDING` when AFIP was unreachable
 
 ### Project 2 — `afip-soap-server`
 Simulates the AFIP SOAP server.
 
 Responsibilities:
 - Expose a SOAP endpoint
-- Validate invoice data (CUIT format, amounts, items)
+- Validate invoice data (CUIT format, items, amounts recalculated from the items)
 - Generate a fictional CAE code
 - Return XML authorization response
 
@@ -83,6 +85,13 @@ spring.jpa.properties.hibernate.jdbc.time_zone=UTC
 # AFIP SOAP
 afip.soap.url=http://localhost:8081/ws/invoice
 afip.soap.wsdl=http://localhost:8081/ws/invoice.wsdl
+afip.soap.connect-timeout-ms=5000
+afip.soap.read-timeout-ms=10000
+
+# AFIP retry — PENDING invoices are resent every interval
+# (only those older than min-age, which must exceed connect + read timeout)
+afip.retry.interval-ms=60000
+afip.retry.min-age-ms=120000
 
 # JWT
 jwt.secret=your_secret_key_min_64_characters_long_replace_in_production
@@ -320,12 +329,18 @@ http://localhost:8081/ws/invoice.wsdl
             "unitPrice": 1000.00,
             "vatRate": "VAT_21"
         }
-    ],
-    "netAmount": 1000.00,
-    "vatAmount": 210.00,
-    "totalAmount": 1210.00
+    ]
 }
 ```
+
+Amounts are **not** sent by the client — `billing-client` calculates them from the items:
+
+- `subtotal = quantity × unitPrice`, rounded to 2 decimals
+- `netAmount` = sum of subtotals
+- `vatAmount` = VAT calculated **once per rate** over the subtotals with that rate (not item by item), rounded to 2 decimals
+- `totalAmount = netAmount + vatAmount`
+
+`quantity` and `unitPrice` accept up to 2 decimals.
 
 ### Approved Response — 201 Created
 
@@ -355,11 +370,21 @@ http://localhost:8081/ws/invoice.wsdl
 
 ### Invoice Status Values
 
-| Status | Description |
-|--------|-------------|
-| `PENDING` | Saved locally, AFIP call in progress |
-| `APPROVED` | CAE issued, invoice is valid |
-| `REJECTED` | AFIP validation failed |
+| Status | HTTP | Description |
+|--------|------|-------------|
+| `APPROVED` | `201 Created` | CAE issued, invoice is valid |
+| `REJECTED` | `201 Created` | AFIP validation failed — `afipMessage` lists the error codes |
+| `PENDING` | `202 Accepted` | Saved, but AFIP could not be reached. A background job resends it automatically every minute |
+
+Rejected example:
+
+```json
+{
+    "status": "REJECTED",
+    "afipMessage": "Invoice rejected. Please review the errors. ERR_004: Issuer CUIT format is invalid. Expected format: XX-XXXXXXXX-X",
+    "cae": null
+}
+```
 
 ---
 
@@ -371,7 +396,7 @@ The system has two independent validation layers:
 Validates the REST request before it reaches the service layer.
 - Required fields
 - CUIT format (`XX-XXXXXXXX-X`)
-- Positive amounts
+- Positive quantities and non-negative prices, with up to 2 decimals
 - At least one item
 
 Returns `400 BAD REQUEST` on failure:
@@ -403,6 +428,7 @@ A body that can't be parsed (malformed JSON, unknown enum value, text in a numer
 Validates business rules on the SOAP server side.
 - CUIT format on both issuer and receiver
 - Item quantities and prices
+- Recalculates every amount from the items instead of trusting the client: item subtotals, net amount and VAT per rate
 - Cross-check: `totalAmount == netAmount + vatAmount`
 
 Returns `201` with `status: REJECTED` and a list of error codes on failure.
@@ -412,13 +438,26 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 | Code | Description |
 |------|-------------|
 | `ERR_001` | External invoice ID is required |
+| `ERR_002` | Issuer information is required |
 | `ERR_003` | Issuer CUIT is required |
 | `ERR_004` | Issuer CUIT format invalid |
+| `ERR_005` | Issuer business name is required |
+| `ERR_006` | Receiver information is required |
 | `ERR_007` | Receiver CUIT is required |
 | `ERR_008` | Receiver CUIT format invalid |
+| `ERR_009` | Receiver business name is required |
 | `ERR_010` | Invoice must contain at least one item |
+| `ERR_011` | Item description is required |
+| `ERR_012` | Item quantity must be greater than zero |
+| `ERR_013` | Item unit price cannot be negative |
+| `ERR_014` | Item VAT rate is required |
 | `ERR_015` | Net amount must be greater than zero |
+| `ERR_016` | VAT amount cannot be negative |
+| `ERR_017` | Total amount must be greater than zero |
 | `ERR_018` | Total amount does not match netAmount + vatAmount |
+| `ERR_019` | Item subtotal does not match quantity × unitPrice |
+| `ERR_020` | Net amount does not match the sum of item subtotals |
+| `ERR_021` | VAT amount does not match the VAT calculated from the items |
 
 ---
 
@@ -431,11 +470,14 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 
 | Project | Test Class | Coverage |
 |---------|-----------|----------|
-| `afip-soap-server` | `InvoiceValidatorTest` | 13 unit tests — all validation rules |
+| `afip-soap-server` | `InvoiceValidatorTest` | 17 unit tests — all validation rules, including amounts vs items |
 | `afip-soap-server` | `CaeGeneratorServiceImplTest` | 8 unit tests — approved and rejected flows |
-| `billing-client` | `InvoiceControllerTest` | 12 integration tests — REST endpoints, validation and error responses with MockMvc |
+| `billing-client` | `InvoiceControllerTest` | 15 integration tests — REST endpoints, validation, 201/202 and error responses with MockMvc |
 | `billing-client` | `AuthControllerTest` | 7 integration tests — login, register and 401/403/409 responses |
+| `billing-client` | `InvoiceServiceImplTest` | 7 unit tests — PENDING → AFIP flow, rejection details, AFIP unreachable and retries |
+| `billing-client` | `InvoiceTest` | 4 unit tests — amount calculation and VAT rounding per rate |
 | `billing-client` | `AdminInitializerTest` | 2 unit tests — initial admin creation |
+| `billing-client` | `PendingInvoiceRetryJobTest` | 1 unit test — retry cutoff |
 
 `BillingClientApplicationTests` loads the full context, so it needs PostgreSQL running (`docker-compose up -d`).
 
@@ -458,7 +500,11 @@ Call `POST /api/auth/login`, click **Authorize** and paste the token to try the 
 
 **XSD as the single source of truth** — The SOAP contract is defined once in `afip-invoice.xsd` and shared between both projects. JAXB generates Java classes automatically from it. Any contract change only requires updating the XSD.
 
-**Save before calling AFIP** — The invoice is persisted as `PENDING` before the SOAP call. This guarantees a database record exists even if the SOAP server is unreachable, enabling retry logic in the future.
+**Save before calling AFIP** — The invoice is persisted and committed as `PENDING` before the SOAP call, and the call itself runs outside any DB transaction. A record exists even if AFIP is unreachable, no DB connection is held while waiting for AFIP, and an unexpected error can't roll back the invoice.
+
+**PENDING is not REJECTED** — If AFIP can't be reached (connection error or timeout), the invoice stays `PENDING` and the API answers `202 Accepted`. `PendingInvoiceRetryJob` resends those invoices periodically, only once they are older than the SOAP timeouts so an in-flight call is never duplicated.
+
+**Amounts calculated from the items** — The client never sends totals. `billing-client` calculates them, and `afip-soap-server` recalculates them independently and rejects any mismatch, like real AFIP does.
 
 **Interface + Implementation pattern on services** — Every service is defined as an interface (`InvoiceService`) and implemented separately (`InvoiceServiceImpl`). Controllers always inject the interface, making the implementation swappable without touching the controller layer.
 

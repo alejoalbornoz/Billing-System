@@ -4,14 +4,28 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import server.soap.afip.invoice.AuthorizeInvoiceRequest;
 import server.soap.afip.invoice.InvoiceItem;
+import server.soap.afip.invoice.VatRate;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @Slf4j
 @Component
 public class InvoiceValidator {
+
+    /** VAT percentage for each rate of the XSD contract. */
+    private static final Map<VatRate, BigDecimal> VAT_RATES = new EnumMap<>(Map.of(
+            VatRate.EXEMPT,   BigDecimal.ZERO,
+            VatRate.ZERO,     BigDecimal.ZERO,
+            VatRate.VAT_10_5, new BigDecimal("0.105"),
+            VatRate.VAT_21,   new BigDecimal("0.21"),
+            VatRate.VAT_27,   new BigDecimal("0.27")
+    ));
 
     /**
      * Represents a single validation error.
@@ -44,6 +58,7 @@ public class InvoiceValidator {
         validateReceiver(request, errors);
         validateItems(request, errors);
         validateAmounts(request, errors);
+        validateAmountsMatchItems(request, errors);
 
         if (!errors.isEmpty()) {
             log.warn("Validation failed for externalInvoiceId: {} — {} error(s) found",
@@ -148,6 +163,20 @@ public class InvoiceValidator {
                         prefix + " VAT rate is required."
                 ));
             }
+
+            if (item.getQuantity() != null && item.getUnitPrice() != null) {
+                BigDecimal expectedSubtotal = item.getQuantity()
+                        .multiply(item.getUnitPrice())
+                        .setScale(2, RoundingMode.HALF_UP);
+
+                if (item.getSubtotal() == null || item.getSubtotal().compareTo(expectedSubtotal) != 0) {
+                    errors.add(new ValidationError(
+                            "ERR_019",
+                            prefix + " subtotal (" + item.getSubtotal() + ") does not match " +
+                                    "quantity * unitPrice (" + expectedSubtotal + ")."
+                    ));
+                }
+            }
         }
     }
 
@@ -188,6 +217,57 @@ public class InvoiceValidator {
                                 "netAmount + vatAmount (" + expectedTotal + ")."
                 ));
             }
+        }
+    }
+
+    /**
+     * Recalculates net and VAT from the items instead of trusting the client.
+     *
+     * VAT is calculated once per rate over the sum of the subtotals with that rate,
+     * rounded to 2 decimals — the client must use the same method.
+     */
+    private void validateAmountsMatchItems(AuthorizeInvoiceRequest request,
+                                           List<ValidationError> errors) {
+        if (request.getItems() == null || request.getItems().getItem().isEmpty()) {
+            return;
+        }
+
+        List<InvoiceItem> items = request.getItems().getItem();
+
+        // Missing subtotals or rates were already reported by validateItems
+        if (items.stream().anyMatch(item -> item.getSubtotal() == null || item.getVatRate() == null)) {
+            return;
+        }
+
+        Map<VatRate, BigDecimal> taxableBaseByRate = items.stream()
+                .collect(Collectors.groupingBy(
+                        InvoiceItem::getVatRate,
+                        () -> new EnumMap<>(VatRate.class),
+                        Collectors.reducing(BigDecimal.ZERO, InvoiceItem::getSubtotal, BigDecimal::add)));
+
+        BigDecimal expectedNet = taxableBaseByRate.values().stream()
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal expectedVat = taxableBaseByRate.entrySet().stream()
+                .map(entry -> entry.getValue()
+                        .multiply(VAT_RATES.get(entry.getKey()))
+                        .setScale(2, RoundingMode.HALF_UP))
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        if (request.getNetAmount() != null && request.getNetAmount().compareTo(expectedNet) != 0) {
+            errors.add(new ValidationError(
+                    "ERR_020",
+                    "Net amount (" + request.getNetAmount() + ") does not match " +
+                            "the sum of item subtotals (" + expectedNet + ")."
+            ));
+        }
+
+        if (request.getVatAmount() != null && request.getVatAmount().compareTo(expectedVat) != 0) {
+            errors.add(new ValidationError(
+                    "ERR_021",
+                    "VAT amount (" + request.getVatAmount() + ") does not match " +
+                            "the VAT calculated from the items (" + expectedVat + ")."
+            ));
         }
     }
 

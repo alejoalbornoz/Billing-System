@@ -2,12 +2,14 @@ package com.billing_client.billing_client.controller;
 
 import com.billing_client.billing_client.dto.request.InvoiceRequestDTO;
 import com.billing_client.billing_client.dto.response.InvoiceResponseDTO;
+import com.billing_client.billing_client.model.enums.InvoiceStatus;
 import com.billing_client.billing_client.service.InvoiceService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -27,22 +29,27 @@ public class InvoiceController {
      *
      * Flow:
      *   1. Spring validates the request body (@Valid)
-     *   2. Service saves the invoice as PENDING
+     *   2. Service calculates the amounts and saves the invoice as PENDING
      *   3. Service calls AFIP via SOAP
      *   4. Service updates and returns the invoice as APPROVED or REJECTED
      *
-     * Returns 201 CREATED with the invoice (approved or rejected).
+     * Returns 201 CREATED with the invoice (approved or rejected),
+     * or 202 ACCEPTED if AFIP could not be reached and the invoice stays PENDING.
      */
     @PostMapping
     public ResponseEntity<InvoiceResponseDTO> createInvoice(
             @Valid @RequestBody InvoiceRequestDTO request) {
 
-        log.info("REST request to create invoice — issuer: {} | total: {}",
-                request.getIssuerCuit(), request.getTotalAmount());
+        log.info("REST request to create invoice — issuer: {} | items: {}",
+                request.getIssuerCuit(), request.getItems().size());
 
         InvoiceResponseDTO response = invoiceService.processInvoice(request);
 
-        return ResponseEntity.status(HttpStatus.CREATED).body(response);
+        HttpStatus status = response.getStatus() == InvoiceStatus.PENDING
+                ? HttpStatus.ACCEPTED
+                : HttpStatus.CREATED;
+
+        return ResponseEntity.status(status).body(response);
     }
 
     /**
@@ -74,10 +81,12 @@ public class InvoiceController {
 
     /**
      * Retrieves all invoices stored in the database.
+     * Restricted to ADMIN — accountants look up invoices by ID.
      *
      * GET /api/v1/invoices
      */
     @GetMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<List<InvoiceResponseDTO>> getAllInvoices() {
         log.info("REST request to get all invoices");
 
