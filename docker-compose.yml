@@ -1,0 +1,59 @@
+name: billing-system
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: billing_db
+      POSTGRES_USER: billing_user
+      POSTGRES_PASSWORD: billing_pass
+    ports:
+      # 5433 on the host so it doesn't clash with a locally installed PostgreSQL
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U billing_user -d billing_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  afip-soap-server:
+    build: ./afip-soap-server
+    ports:
+      - "8081:8081"
+
+  billing-client:
+    build: ./billing-client
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/billing_db?TimeZone=UTC
+      DB_USERNAME: billing_user
+      DB_PASSWORD: billing_pass
+      AFIP_SOAP_URL: http://afip-soap-server:8081/ws/invoice
+    # Optional overrides (JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD) — see .env.example
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # Not required to start: if AFIP is down, invoices stay PENDING and are resent later
+      afip-soap-server:
+        condition: service_started
+
+  # Optional DB admin UI: docker compose --profile tools up
+  pgadmin:
+    image: dpage/pgadmin4
+    profiles: ["tools"]
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@billing.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

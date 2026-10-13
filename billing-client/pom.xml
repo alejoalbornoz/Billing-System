@@ -22,6 +22,8 @@
     <properties>
         <java.version>17</java.version>
         <mapstruct.version>1.5.5.Final</mapstruct.version>
+        <!-- Overrides Spring Boot's 1.20.x, which can't talk to Docker Engine 29+ -->
+        <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
 
     <dependencies>
@@ -138,6 +140,23 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Testcontainers — integration tests against a real PostgreSQL -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
@@ -153,6 +172,19 @@
                             <artifactId>lombok</artifactId>
                         </exclude>
                     </excludes>
+                </configuration>
+            </plugin>
+
+            <!--
+                Tests run in UTC, like the app (see BillingClientApplication.main).
+                The PostgreSQL driver sends the JVM time zone to the server, and legacy IDs
+                such as "America/Buenos_Aires" are rejected by recent PostgreSQL images.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>-Duser.timezone=UTC</argLine>
                 </configuration>
             </plugin>
 

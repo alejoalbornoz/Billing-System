@@ -1,5 +1,7 @@
 # 🧾 AFIP Billing System
 
+[![CI](https://github.com/alejoalbornoz/Billing-System/actions/workflows/ci.yml/badge.svg)](https://github.com/alejoalbornoz/Billing-System/actions/workflows/ci.yml)
+
 A hybrid REST + SOAP billing system inspired by AFIP (Argentina's tax authority), built with two independent Spring Boot applications. A client company submits invoices via REST, which are then authorized by a mock AFIP SOAP server that validates the data and generates a CAE code.
 
 ---
@@ -16,6 +18,8 @@ A hybrid REST + SOAP billing system inspired by AFIP (Argentina's tax authority)
 - **JAXB (XML Binding)**
 - **Lombok**
 - **Docker + Docker Compose**
+- **JUnit 5 + Mockito + Testcontainers**
+- **GitHub Actions (CI)**
 - **Maven**
 
 ---
@@ -61,99 +65,78 @@ Responsibilities:
 
 ---
 
-## ⚙️ Configuration
-
-### `billing-client` — application.properties
-
-```properties
-spring.application.name=billing-client
-server.port=8080
-
-# Database
-spring.datasource.url=jdbc:postgresql://localhost:5432/billing_db?TimeZone=UTC
-spring.datasource.username=billing_user
-spring.datasource.password=billing_pass
-spring.datasource.driver-class-name=org.postgresql.Driver
-
-# JPA
-spring.jpa.hibernate.ddl-auto=update
-spring.jpa.show-sql=true
-spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
-spring.jpa.properties.hibernate.format_sql=true
-spring.jpa.properties.hibernate.jdbc.time_zone=UTC
-
-# AFIP SOAP
-afip.soap.url=http://localhost:8081/ws/invoice
-afip.soap.wsdl=http://localhost:8081/ws/invoice.wsdl
-afip.soap.connect-timeout-ms=5000
-afip.soap.read-timeout-ms=10000
-
-# AFIP retry — PENDING invoices are resent every interval
-# (only those older than min-age, which must exceed connect + read timeout)
-afip.retry.interval-ms=60000
-afip.retry.min-age-ms=120000
-
-# JWT
-jwt.secret=your_secret_key_min_64_characters_long_replace_in_production
-jwt.expiration=86400000
-
-# Swagger
-springdoc.swagger-ui.path=/swagger-ui.html
-springdoc.api-docs.path=/v3/api-docs
-```
-
-### `afip-soap-server` — application.properties
-
-```properties
-spring.application.name=afip-soap-server
-server.port=8081
-
-# CAE Generator
-afip.cae.prefix=CAE
-afip.cae.length=14
-```
-
----
-
 ## 🚀 Running the Project
 
-### Prerequisites
-- Java 17
-- Maven
-- Docker Desktop
+### Option A — Everything with Docker (recommended)
 
-### Steps
+Only **Docker** is required.
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/alejoalbornoz/Billing-System
-
-# 2. Start PostgreSQL and pgAdmin containers
-cd Billing-System/billing-client
-docker-compose up -d
-
-# 3. Run afip-soap-server first (port 8081)
-cd ../afip-soap-server
-./mvnw spring-boot:run
-
-# 4. In another terminal, run billing-client (port 8080)
-cd Billing-System/billing-client
-./mvnw spring-boot:run
+cd Billing-System
+docker compose up --build
 ```
 
+This starts PostgreSQL, `afip-soap-server` (`:8081`) and `billing-client` (`:8080`).
 On first startup `billing-client` creates an admin user (see [Authentication](#-authentication)).
+
+Open Swagger UI at `http://localhost:8080/swagger-ui.html`.
+
+### Option B — Run the apps locally (for development)
+
+Requires **Java 17** and **Docker** (for PostgreSQL only).
+
+```bash
+# 1. Start only PostgreSQL
+docker compose up -d postgres
+
+# 2. Run afip-soap-server (port 8081)
+cd afip-soap-server
+./mvnw spring-boot:run
+
+# 3. In another terminal, run billing-client (port 8080)
+cd billing-client
+./mvnw spring-boot:run
+```
 
 ### Stop containers
 
 ```bash
-# Stop but keep data
-docker-compose stop
-
-# Stop and remove containers
-docker-compose down
+# Stop and remove containers, keep data
+docker compose down
 
 # Stop and remove everything including data
-docker-compose down -v
+docker compose down -v
+```
+
+---
+
+## ⚙️ Configuration
+
+`billing-client` reads its settings from environment variables. Every variable has a default for local development, so nothing needs to be set to try the project.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_URL` | `jdbc:postgresql://localhost:5433/billing_db?TimeZone=UTC` | PostgreSQL JDBC URL |
+| `DB_USERNAME` | `billing_user` | Database user |
+| `DB_PASSWORD` | `billing_pass` | Database password |
+| `AFIP_SOAP_URL` | `http://localhost:8081/ws/invoice` | AFIP SOAP endpoint |
+| `JWT_SECRET` | development-only value | Secret used to sign JWTs (64+ characters). **Set it in any real environment** |
+| `ADMIN_EMAIL` | `admin@billing.com` | Initial admin email |
+| `ADMIN_PASSWORD` | `admin12345` | Initial admin password |
+
+With Docker Compose, `docker-compose.yml` already points the database and AFIP URLs to the other containers. To override `JWT_SECRET` or the admin credentials, copy `.env.example` to `.env` and uncomment the variables you need.
+
+Timeouts and retry settings live in `billing-client/src/main/resources/application.properties`:
+
+```properties
+afip.soap.connect-timeout-ms=5000
+afip.soap.read-timeout-ms=10000
+
+# PENDING invoices are resent every interval
+# (only those older than min-age, which must exceed connect + read timeout)
+afip.retry.interval-ms=60000
+afip.retry.min-age-ms=120000
 ```
 
 ---
@@ -162,22 +145,23 @@ docker-compose down -v
 
 Tables are created automatically by Hibernate on startup (`ddl-auto=update`).
 
-Access pgAdmin at `http://localhost:5050`
+PostgreSQL is exposed on port **5433** of the host (not 5432), so it doesn't clash with a locally installed PostgreSQL.
 
 ```
-Email:    admin@billing.com
-Password: admin123
-```
-
-Connect to the PostgreSQL server with:
-
-```
-Host:     postgres
-Port:     5432
+Host:     localhost
+Port:     5433
 Database: billing_db
 Username: billing_user
 Password: billing_pass
 ```
+
+pgAdmin is optional. Start it with:
+
+```bash
+docker compose --profile tools up -d
+```
+
+Then open `http://localhost:5050` (`admin@billing.com` / `admin123`) and register the server with host `postgres` and port `5432` — inside the Docker network the database is reached by its service name.
 
 ---
 
@@ -478,8 +462,12 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 | `billing-client` | `InvoiceTest` | 4 unit tests — amount calculation and VAT rounding per rate |
 | `billing-client` | `AdminInitializerTest` | 2 unit tests — initial admin creation |
 | `billing-client` | `PendingInvoiceRetryJobTest` | 1 unit test — retry cutoff |
+| `billing-client` | `InvoiceServiceIntegrationTest` | 2 integration tests — PENDING persisted and retried against a real PostgreSQL |
+| `billing-client` | `BillingClientApplicationTests` | 2 integration tests — full context startup and initial admin creation |
 
-`BillingClientApplicationTests` loads the full context, so it needs PostgreSQL running (`docker-compose up -d`).
+The last two use **Testcontainers** to start a real PostgreSQL in Docker. If Docker isn't running they are skipped, not failed.
+
+Every push and pull request runs both test suites and builds the Docker images in **GitHub Actions** (`.github/workflows/ci.yml`).
 
 ---
 
