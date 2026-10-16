@@ -106,6 +106,34 @@ class InvoiceControllerTest {
     }
 
     @Test
+    @DisplayName("Should return 400 when receiver CUIT has a wrong check digit")
+    @WithMockUser(roles = "ADMIN")
+    void shouldReturn400_whenReceiverCuitCheckDigitIsWrong() throws Exception {
+        validRequest.setReceiverCuit("20-12345678-9"); // valid check digit is 6
+
+        mockMvc.perform(post("/api/v1/invoices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(validRequest)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.receiverCuit").value("CUIT check digit is invalid."));
+
+        verifyNoInteractions(invoiceService);
+    }
+
+    @Test
+    @DisplayName("Should return 400 when point of sale is missing")
+    @WithMockUser(roles = "ADMIN")
+    void shouldReturn400_whenPointOfSaleIsMissing() throws Exception {
+        validRequest.setPointOfSale(null);
+
+        mockMvc.perform(post("/api/v1/invoices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(validRequest)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.fieldErrors.pointOfSale").value("Point of sale is required."));
+    }
+
+    @Test
     @DisplayName("Should return 400 when items list is empty")
     @WithMockUser(roles = "ADMIN")
     void shouldReturn400_whenItemsListIsEmpty() throws Exception {
@@ -271,10 +299,10 @@ class InvoiceControllerTest {
                 .invoiceType(InvoiceType.INVOICE_B)
                 .issueDate(LocalDate.of(2026, 5, 19))
                 .pointOfSale(1)
-                .issuerCuit("30-71234567-0")
+                .issuerCuit("30-71234567-1")
                 .issuerBusinessName("Mi Empresa SRL")
                 .issuerAddress("Av. Corrientes 1234, CABA")
-                .receiverCuit("20-12345678-9")
+                .receiverCuit("20-12345678-6")
                 .receiverBusinessName("Cliente SA")
                 .receiverAddress("Av. Santa Fe 5678, CABA")
                 .items(List.of(
@@ -294,9 +322,9 @@ class InvoiceControllerTest {
                 .externalInvoiceId("test-uuid-1234")
                 .invoiceType(InvoiceType.INVOICE_B)
                 .issueDate(LocalDate.of(2026, 5, 19))
-                .issuerCuit("30-71234567-0")
+                .issuerCuit("30-71234567-1")
                 .issuerBusinessName("Mi Empresa SRL")
-                .receiverCuit("20-12345678-9")
+                .receiverCuit("20-12345678-6")
                 .receiverBusinessName("Cliente SA")
                 .netAmount(new BigDecimal("1000.00"))
                 .vatAmount(new BigDecimal("210.00"))

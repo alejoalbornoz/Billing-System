@@ -115,9 +115,9 @@ class InvoiceServiceIntegrationTest {
                 .invoiceType(InvoiceType.INVOICE_B)
                 .issueDate(LocalDate.of(2026, 5, 19))
                 .pointOfSale(1)
-                .issuerCuit("30-71234567-0")
+                .issuerCuit("30-71234567-1")
                 .issuerBusinessName("Mi Empresa SRL")
-                .receiverCuit("20-12345678-9")
+                .receiverCuit("20-12345678-6")
                 .receiverBusinessName("Cliente SA")
                 .items(List.of(
                         InvoiceItemRequestDTO.builder()

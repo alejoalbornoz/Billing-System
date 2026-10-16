@@ -22,6 +22,9 @@ services:
     build: ./afip-soap-server
     ports:
       - "8081:8081"
+    volumes:
+      # AFIP's registry of authorized invoices: numbering survives restarts
+      - afip_data:/app/data
 
   billing-client:
     build: ./billing-client
@@ -57,3 +60,4 @@ services:
 
 volumes:
   postgres_data:
+  afip_data:

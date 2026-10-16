@@ -100,8 +100,8 @@
                 <xs:element name="vatAmount"         type="xs:decimal"          minOccurs="1" maxOccurs="1"/>  <!-- Total VAT       -->
                 <xs:element name="totalAmount"       type="xs:decimal"          minOccurs="1" maxOccurs="1"/>  <!-- netAmount + VAT -->
 
-                <!-- Optional: point of sale number (punto de venta) -->
-                <xs:element name="pointOfSale"       type="xs:integer"          minOccurs="0" maxOccurs="1"/>
+                <!-- Point of sale (punto de venta) — invoices are numbered per issuer + point of sale + type -->
+                <xs:element name="pointOfSale"       type="xs:integer"          minOccurs="1" maxOccurs="1"/>
 
             </xs:sequence>
         </xs:complexType>
@@ -152,6 +152,33 @@
                     </xs:complexType>
                 </xs:element>
 
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <!-- ============================================================ -->
+    <!--  LAST AUTHORIZED INVOICE — equivalent to AFIP's              -->
+    <!--  FECompUltimoAutorizado                                      -->
+    <!-- ============================================================ -->
+
+    <xs:element name="GetLastAuthorizedInvoiceRequest">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="issuerCuit"  type="xs:string"       minOccurs="1" maxOccurs="1"/>
+                <xs:element name="pointOfSale" type="xs:integer"      minOccurs="1" maxOccurs="1"/>
+                <xs:element name="invoiceType" type="tns:InvoiceType" minOccurs="1" maxOccurs="1"/>
+            </xs:sequence>
+        </xs:complexType>
+    </xs:element>
+
+    <xs:element name="GetLastAuthorizedInvoiceResponse">
+        <xs:complexType>
+            <xs:sequence>
+                <xs:element name="issuerCuit"        type="xs:string"       minOccurs="1" maxOccurs="1"/>
+                <xs:element name="pointOfSale"       type="xs:integer"      minOccurs="1" maxOccurs="1"/>
+                <xs:element name="invoiceType"       type="tns:InvoiceType" minOccurs="1" maxOccurs="1"/>
+                <!-- 0 when nothing has been authorized yet for this series -->
+                <xs:element name="lastInvoiceNumber" type="xs:long"         minOccurs="1" maxOccurs="1"/>
             </xs:sequence>
         </xs:complexType>
     </xs:element>

@@ -1,21 +1,33 @@
 package com.afip.soap.server.service;
 
 
+import com.afip.soap.server.model.AuthorizedInvoice;
+import com.afip.soap.server.repository.AuthorizedInvoiceRepository;
 import com.afip.soap.server.service.impl.CaeGeneratorServiceImpl;
 import com.afip.soap.server.validator.InvoiceValidator;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -25,8 +37,30 @@ class CaeGeneratorServiceImplTest {
     @Mock
     private InvoiceValidator invoiceValidator;
 
+    @Mock
+    private AuthorizedInvoiceRepository authorizedInvoiceRepository;
+
+    @Mock
+    private TransactionTemplate transactionTemplate;
+
     @InjectMocks
     private CaeGeneratorServiceImpl caeGeneratorService;
+
+    @BeforeEach
+    void setUp() {
+        // Runs the callback directly, as if inside a transaction
+        lenient().when(transactionTemplate.execute(any())).thenAnswer(invocation ->
+                invocation.<TransactionCallback<?>>getArgument(0)
+                        .doInTransaction(mock(TransactionStatus.class)));
+
+        // By default: a new invoice, first of its series
+        lenient().when(authorizedInvoiceRepository.findByExternalInvoiceId(anyString()))
+                .thenReturn(Optional.empty());
+        lenient().when(authorizedInvoiceRepository.findLastInvoiceNumber(anyString(), anyInt(), any()))
+                .thenReturn(0L);
+        lenient().when(authorizedInvoiceRepository.save(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+    }
 
     // ─────────────────────────────────────────────
     //  APPROVED
@@ -65,7 +99,9 @@ class CaeGeneratorServiceImplTest {
 
         server.soap.afip.invoice.AuthorizeInvoiceResponse response = caeGeneratorService.authorize(buildRequest());
 
-        assertThat(response.getCaeExpirationDate()).isNotNull();
+        javax.xml.datatype.XMLGregorianCalendar expiration = response.getCaeExpirationDate();
+        assertThat(LocalDate.of(expiration.getYear(), expiration.getMonth(), expiration.getDay()))
+                .isEqualTo(LocalDate.now().plusDays(10));
     }
 
     @Test
@@ -147,6 +183,59 @@ class CaeGeneratorServiceImplTest {
     }
 
     // ─────────────────────────────────────────────
+    //  NUMBERING & IDEMPOTENCY
+    // ─────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Should assign the next number of the series (last authorized + 1)")
+    void shouldAssignNextNumberOfTheSeries() {
+        when(invoiceValidator.validate(any())).thenReturn(Collections.emptyList());
+        when(authorizedInvoiceRepository.findLastInvoiceNumber(
+                "30-71234567-1", 1, server.soap.afip.invoice.InvoiceType.INVOICE_B))
+                .thenReturn(41L);
+
+        server.soap.afip.invoice.AuthorizeInvoiceResponse response = caeGeneratorService.authorize(buildRequest());
+
+        assertThat(response.getAfipInvoiceNumber()).isEqualTo(42L);
+        verify(authorizedInvoiceRepository).save(any(AuthorizedInvoice.class));
+    }
+
+    @Test
+    @DisplayName("Should return the original CAE when the invoice was already authorized")
+    void shouldReturnOriginalCae_whenAlreadyAuthorized() {
+        AuthorizedInvoice original = AuthorizedInvoice.builder()
+                .externalInvoiceId("test-uuid-5678")
+                .invoiceNumber(7L)
+                .cae("12345678901234")
+                .caeExpirationDate(LocalDate.of(2026, 6, 4))
+                .authorizedAt(LocalDateTime.of(2026, 5, 25, 18, 0))
+                .build();
+        when(authorizedInvoiceRepository.findByExternalInvoiceId("test-uuid-5678"))
+                .thenReturn(Optional.of(original));
+
+        server.soap.afip.invoice.AuthorizeInvoiceResponse response = caeGeneratorService.authorize(buildRequest());
+
+        assertThat(response.getStatus()).isEqualTo(server.soap.afip.invoice.AuthorizationStatus.APPROVED);
+        assertThat(response.getCae()).isEqualTo("12345678901234");
+        assertThat(response.getAfipInvoiceNumber()).isEqualTo(7L);
+        assertThat(response.getMessage()).isEqualTo("Invoice already authorized. Returning the original CAE.");
+        verifyNoInteractions(invoiceValidator);
+        verify(authorizedInvoiceRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("Should not register anything when the invoice is rejected")
+    void shouldNotRegisterInvoice_whenRejected() {
+        when(invoiceValidator.validate(any())).thenReturn(
+                List.of(new InvoiceValidator.ValidationError("ERR_022", "Issuer CUIT check digit is invalid."))
+        );
+
+        caeGeneratorService.authorize(buildRequest());
+
+        verify(authorizedInvoiceRepository, never()).save(any());
+    }
+
+    // ─────────────────────────────────────────────
     //  BUILDER
     // ─────────────────────────────────────────────
 
@@ -154,14 +243,15 @@ class CaeGeneratorServiceImplTest {
         server.soap.afip.invoice.AuthorizeInvoiceRequest request = new server.soap.afip.invoice.AuthorizeInvoiceRequest();
         request.setExternalInvoiceId("test-uuid-5678");
         request.setInvoiceType(server.soap.afip.invoice.InvoiceType.INVOICE_B);
+        request.setPointOfSale(BigInteger.ONE);
 
         server.soap.afip.invoice.TaxpayerInfo issuer = new server.soap.afip.invoice.TaxpayerInfo();
-        issuer.setCuit("30-71234567-0");
+        issuer.setCuit("30-71234567-1");
         issuer.setBusinessName("Mi Empresa SRL");
         request.setIssuer(issuer);
 
         server.soap.afip.invoice.TaxpayerInfo receiver = new server.soap.afip.invoice.TaxpayerInfo();
-        receiver.setCuit("20-12345678-9");
+        receiver.setCuit("20-12345678-6");
         receiver.setBusinessName("Cliente SA");
         request.setReceiver(receiver);
 

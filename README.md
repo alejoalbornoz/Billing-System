@@ -14,7 +14,7 @@ A hybrid REST + SOAP billing system inspired by AFIP (Argentina's tax authority)
 - **Spring Security + JWT (jjwt)**
 - **Spring Data JPA + Hibernate**
 - **springdoc-openapi (Swagger UI)**
-- **PostgreSQL 15**
+- **PostgreSQL 15** (billing-client) / **H2** (AFIP mock registry)
 - **JAXB (XML Binding)**
 - **Lombok**
 - **Docker + Docker Compose**
@@ -59,8 +59,9 @@ Simulates the AFIP SOAP server.
 
 Responsibilities:
 - Expose a SOAP endpoint
-- Validate invoice data (CUIT format, items, amounts recalculated from the items)
-- Generate a fictional CAE code
+- Validate invoice data (CUIT with check digit, point of sale, items, amounts recalculated from the items)
+- Assign correlative invoice numbers per series and generate a fictional CAE
+- Keep a registry of authorized invoices (H2) — a resent invoice gets its original CAE back
 - Return XML authorization response
 
 ---
@@ -253,6 +254,35 @@ WSDL available at:
 http://localhost:8081/ws/invoice.wsdl
 ```
 
+| Operation | AFIP equivalent | Description |
+|-----------|-----------------|-------------|
+| `AuthorizeInvoice` | `FECAESolicitar` | Validates the invoice, assigns its number and returns the CAE |
+| `GetLastAuthorizedInvoice` | `FECompUltimoAutorizado` | Last number authorized for a series, or `0` |
+
+### Invoice Numbering
+
+Like AFIP, invoices are numbered **correlatively per series**: issuer CUIT + point of sale + invoice type. The first `INVOICE_B` of point of sale `1` is number 1, the next one is 2, and an `INVOICE_A` or another point of sale starts its own count. That's why `pointOfSale` is required.
+
+- **No gaps or duplicates** — reading the last number, saving the next one and committing happen under a single lock, and a unique constraint on the series + number backs it up. A rejected invoice doesn't consume a number.
+- **Idempotent** — if the same `externalInvoiceId` is authorized twice (e.g. `billing-client` retried after a lost response), the mock returns the original CAE and number instead of a new one.
+- **Survives restarts** — authorized invoices are stored in an H2 file database (a Docker volume in Compose).
+
+Query the last authorized number:
+
+```bash
+curl -s http://localhost:8081/ws -H "Content-Type: text/xml" -d '
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:inv="http://www.afip.soap.server/invoice">
+  <soapenv:Body>
+    <inv:GetLastAuthorizedInvoiceRequest>
+      <inv:issuerCuit>30-71234567-1</inv:issuerCuit>
+      <inv:pointOfSale>1</inv:pointOfSale>
+      <inv:invoiceType>INVOICE_B</inv:invoiceType>
+    </inv:GetLastAuthorizedInvoiceRequest>
+  </soapenv:Body>
+</soapenv:Envelope>'
+```
+
 ### Supported Invoice Types
 
 | Value | Description |
@@ -300,10 +330,10 @@ http://localhost:8081/ws/invoice.wsdl
     "invoiceType": "INVOICE_B",
     "issueDate": "2026-05-19",
     "pointOfSale": 1,
-    "issuerCuit": "30-71234567-0",
+    "issuerCuit": "30-71234567-1",
     "issuerBusinessName": "Mi Empresa SRL",
     "issuerAddress": "Av. Corrientes 1234, CABA",
-    "receiverCuit": "20-12345678-9",
+    "receiverCuit": "20-12345678-6",
     "receiverBusinessName": "Cliente SA",
     "receiverAddress": "Av. Santa Fe 5678, CABA",
     "items": [
@@ -335,9 +365,9 @@ Amounts are **not** sent by the client — `billing-client` calculates them from
     "invoiceType": "INVOICE_B",
     "issueDate": "2026-05-19",
     "pointOfSale": 1,
-    "issuerCuit": "30-71234567-0",
+    "issuerCuit": "30-71234567-1",
     "issuerBusinessName": "Mi Empresa SRL",
-    "receiverCuit": "20-12345678-9",
+    "receiverCuit": "20-12345678-6",
     "receiverBusinessName": "Cliente SA",
     "netAmount": 1000.00,
     "vatAmount": 210.00,
@@ -345,7 +375,7 @@ Amounts are **not** sent by the client — `billing-client` calculates them from
     "status": "APPROVED",
     "cae": "43969379396831",
     "caeExpirationDate": "2026-06-04",
-    "afipInvoiceNumber": 2799044,
+    "afipInvoiceNumber": 1,
     "afipMessage": "Invoice authorized successfully by AFIP.",
     "items": [...],
     "createdAt": "2026-05-25T18:34:52"
@@ -378,8 +408,8 @@ The system has two independent validation layers:
 
 **Layer 1 — Spring `@Valid` (billing-client)**
 Validates the REST request before it reaches the service layer.
-- Required fields
-- CUIT format (`XX-XXXXXXXX-X`)
+- Required fields, including the point of sale (1 to 99999)
+- CUIT format (`XX-XXXXXXXX-X`) and check digit (modulo 11), with the custom `@Cuit` constraint
 - Positive quantities and non-negative prices, with up to 2 decimals
 - At least one item
 
@@ -391,7 +421,7 @@ Returns `400 BAD REQUEST` on failure:
     "error": "Validation Failed",
     "message": "One or more fields are invalid.",
     "fieldErrors": {
-        "issuerCuit": "Issuer CUIT format must be XX-XXXXXXXX-X"
+        "issuerCuit": "CUIT check digit is invalid."
     },
     "timestamp": "2026-05-25T18:39:17"
 }
@@ -410,7 +440,8 @@ A body that can't be parsed (malformed JSON, unknown enum value, text in a numer
 
 **Layer 2 — `InvoiceValidator` (afip-soap-server)**
 Validates business rules on the SOAP server side.
-- CUIT format on both issuer and receiver
+- CUIT format and check digit on both issuer and receiver
+- Point of sale present and between 1 and 99999
 - Item quantities and prices
 - Recalculates every amount from the items instead of trusting the client: item subtotals, net amount and VAT per rate
 - Cross-check: `totalAmount == netAmount + vatAmount`
@@ -442,6 +473,9 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 | `ERR_019` | Item subtotal does not match quantity × unitPrice |
 | `ERR_020` | Net amount does not match the sum of item subtotals |
 | `ERR_021` | VAT amount does not match the VAT calculated from the items |
+| `ERR_022` | Issuer CUIT check digit is invalid |
+| `ERR_023` | Receiver CUIT check digit is invalid |
+| `ERR_024` | Point of sale is required and must be between 1 and 99999 |
 
 ---
 
@@ -454,9 +488,12 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 
 | Project | Test Class | Coverage |
 |---------|-----------|----------|
-| `afip-soap-server` | `InvoiceValidatorTest` | 17 unit tests — all validation rules, including amounts vs items |
-| `afip-soap-server` | `CaeGeneratorServiceImplTest` | 8 unit tests — approved and rejected flows |
-| `billing-client` | `InvoiceControllerTest` | 15 integration tests — REST endpoints, validation, 201/202 and error responses with MockMvc |
+| `afip-soap-server` | `InvoiceValidatorTest` | 23 unit tests — all validation rules, including amounts vs items and CUIT check digit |
+| `afip-soap-server` | `CaeGeneratorServiceImplTest` | 11 unit tests — approved and rejected flows, numbering and idempotency |
+| `afip-soap-server` | `AfipInvoiceEndpointIntegrationTest` | 5 integration tests — real SOAP messages: correlative numbering, idempotency, last authorized, concurrency |
+| `afip-soap-server` | `AfipSoapServerApplicationTests` | 1 integration test — context startup |
+| `billing-client` | `InvoiceControllerTest` | 17 integration tests — REST endpoints, validation, 201/202 and error responses with MockMvc |
+| `billing-client` | `CuitValidatorTest` | 12 unit tests — `@Cuit` format and check digit |
 | `billing-client` | `AuthControllerTest` | 7 integration tests — login, register and 401/403/409 responses |
 | `billing-client` | `InvoiceServiceImplTest` | 7 unit tests — PENDING → AFIP flow, rejection details, AFIP unreachable and retries |
 | `billing-client` | `InvoiceTest` | 4 unit tests — amount calculation and VAT rounding per rate |
@@ -465,7 +502,7 @@ Returns `201` with `status: REJECTED` and a list of error codes on failure.
 | `billing-client` | `InvoiceServiceIntegrationTest` | 2 integration tests — PENDING persisted and retried against a real PostgreSQL |
 | `billing-client` | `BillingClientApplicationTests` | 2 integration tests — full context startup and initial admin creation |
 
-The last two use **Testcontainers** to start a real PostgreSQL in Docker. If Docker isn't running they are skipped, not failed.
+The last two use **Testcontainers** to start a real PostgreSQL in Docker. If Docker isn't running they are skipped, not failed. The `afip-soap-server` integration tests use an in-memory H2.
 
 Every push and pull request runs both test suites and builds the Docker images in **GitHub Actions** (`.github/workflows/ci.yml`).
 
@@ -496,7 +533,9 @@ Call `POST /api/auth/login`, click **Authorize** and paste the token to try the 
 
 **Interface + Implementation pattern on services** — Every service is defined as an interface (`InvoiceService`) and implemented separately (`InvoiceServiceImpl`). Controllers always inject the interface, making the implementation swappable without touching the controller layer.
 
-**CUIT format validation in both layers** — The REST layer validates format with `@Pattern` before the request reaches the service. The SOAP server re-validates independently, simulating real AFIP behavior where the server enforces its own rules regardless of the client.
+**CUIT validation in both layers** — The REST layer validates format and check digit with a custom `@Cuit` constraint before the request reaches the service. The SOAP server re-validates independently, simulating real AFIP behavior where the server enforces its own rules regardless of the client.
+
+**Correlative numbering with a lock around the transaction** — The mock reads the last number of the series, saves the next one and commits inside a single `synchronized` block. Using `@Transactional` alone would commit *after* the lock is released, letting a concurrent request read the same last number. A JVM lock is enough because the mock is a single instance; a multi-instance service would need a database lock per series.
 
 **JWT stateless authentication** — Spring Security is configured as stateless — no HTTP sessions are created. Every request must carry its own JWT token, which is validated by the `JwtAuthFilter` before reaching any controller.
 

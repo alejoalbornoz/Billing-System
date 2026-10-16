@@ -10,6 +10,8 @@ import org.springframework.ws.server.endpoint.annotation.RequestPayload;
 import org.springframework.ws.server.endpoint.annotation.ResponsePayload;
 import server.soap.afip.invoice.AuthorizeInvoiceRequest;
 import server.soap.afip.invoice.AuthorizeInvoiceResponse;
+import server.soap.afip.invoice.GetLastAuthorizedInvoiceRequest;
+import server.soap.afip.invoice.GetLastAuthorizedInvoiceResponse;
 
 @Slf4j
 @Endpoint                   // Marks this class as a SOAP endpoint (like @RestController but for SOAP)
@@ -53,5 +55,20 @@ public class AfipInvoiceEndpoint {
                 response.getStatus());
 
         return response;
+    }
+
+    /**
+     * Returns the last number authorized for a series (issuer CUIT + point of sale + type).
+     * Equivalent to AFIP's FECompUltimoAutorizado.
+     */
+    @PayloadRoot(namespace = NAMESPACE_URI, localPart = "GetLastAuthorizedInvoiceRequest")
+    @ResponsePayload
+    public GetLastAuthorizedInvoiceResponse getLastAuthorizedInvoice(
+            @RequestPayload GetLastAuthorizedInvoiceRequest request) {
+
+        log.info("SOAP request received — last authorized invoice | issuer CUIT: {} | point of sale: {} | type: {}",
+                request.getIssuerCuit(), request.getPointOfSale(), request.getInvoiceType());
+
+        return caeGeneratorService.getLastAuthorizedInvoice(request);
     }
 }

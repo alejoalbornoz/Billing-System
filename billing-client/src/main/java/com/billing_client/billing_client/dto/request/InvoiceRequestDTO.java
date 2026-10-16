@@ -1,6 +1,7 @@
 package com.billing_client.billing_client.dto.request;
 
 import com.billing_client.billing_client.model.enums.InvoiceType;
+import com.billing_client.billing_client.validation.Cuit;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 import lombok.AllArgsConstructor;
@@ -23,7 +24,10 @@ public class InvoiceRequestDTO {
     @NotNull(message = "Issue date is required.")
     private LocalDate issueDate;
 
+    // AFIP numbers invoices per point of sale, so it is required
+    @NotNull(message = "Point of sale is required.")
     @Min(value = 1, message = "Point of sale must be at least 1.")
+    @Max(value = 99999, message = "Point of sale must be at most 99999.")
     private Integer pointOfSale;
 
     // ─────────────────────────────────────────────
@@ -31,7 +35,7 @@ public class InvoiceRequestDTO {
     // ─────────────────────────────────────────────
 
     @NotBlank(message = "Issuer CUIT is required.")
-    @Pattern(regexp = "\\d{2}-\\d{8}-\\d{1}", message = "Issuer CUIT format must be XX-XXXXXXXX-X")
+    @Cuit
     private String issuerCuit;
 
     @NotBlank(message = "Issuer business name is required.")
@@ -44,7 +48,7 @@ public class InvoiceRequestDTO {
     // ─────────────────────────────────────────────
 
     @NotBlank(message = "Receiver CUIT is required.")
-    @Pattern(regexp = "\\d{2}-\\d{8}-\\d{1}", message = "Receiver CUIT format must be XX-XXXXXXXX-X")
+    @Cuit
     private String receiverCuit;
 
     @NotBlank(message = "Receiver business name is required.")

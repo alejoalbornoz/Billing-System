@@ -3,19 +3,25 @@ package com.afip.soap.server.service.impl;
 
 import javax.xml.datatype.DatatypeFactory;
 import javax.xml.datatype.XMLGregorianCalendar;
+import com.afip.soap.server.model.AuthorizedInvoice;
+import com.afip.soap.server.repository.AuthorizedInvoiceRepository;
 import com.afip.soap.server.service.CaeGeneratorService;
 import com.afip.soap.server.validator.InvoiceValidator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 import server.soap.afip.invoice.AuthorizationStatus;
 import server.soap.afip.invoice.AuthorizeInvoiceRequest;
 import server.soap.afip.invoice.AuthorizeInvoiceResponse;
+import server.soap.afip.invoice.GetLastAuthorizedInvoiceRequest;
+import server.soap.afip.invoice.GetLastAuthorizedInvoiceResponse;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Slf4j
@@ -23,34 +29,121 @@ import java.util.concurrent.ThreadLocalRandom;
 @RequiredArgsConstructor
 public class CaeGeneratorServiceImpl implements CaeGeneratorService {
 
+    static final String APPROVED_MESSAGE = "Invoice authorized successfully by AFIP.";
+    static final String ALREADY_AUTHORIZED_MESSAGE =
+            "Invoice already authorized. Returning the original CAE.";
+
+    private static final int CAE_VALIDITY_DAYS = 10;
+
     private final InvoiceValidator invoiceValidator;
+    private final AuthorizedInvoiceRepository authorizedInvoiceRepository;
+    private final TransactionTemplate transactionTemplate;
+
+    /**
+     * Synchronized so that reading the last number, saving the next one and
+     * committing happen as a single step: two requests never get the same number.
+     *
+     * The lock wraps the whole transaction on purpose. With @Transactional the
+     * commit would happen after the lock is released, and a second request could
+     * still read the previous last number.
+     *
+     * A JVM lock is enough because the mock runs as a single instance;
+     * a multi-instance service would need a DB-level lock per series instead.
+     */
+    @Override
+    public synchronized AuthorizeInvoiceResponse authorize(AuthorizeInvoiceRequest request) {
+        return transactionTemplate.execute(status -> authorizeInTransaction(request));
+    }
 
     @Override
-    public AuthorizeInvoiceResponse authorize(AuthorizeInvoiceRequest request) {
+    public GetLastAuthorizedInvoiceResponse getLastAuthorizedInvoice(
+            GetLastAuthorizedInvoiceRequest request) {
 
-        // Step 1 — validate the incoming invoice data
+        Integer pointOfSale = request.getPointOfSale() != null
+                ? request.getPointOfSale().intValue()
+                : null;
+
+        long lastInvoiceNumber = authorizedInvoiceRepository.findLastInvoiceNumber(
+                request.getIssuerCuit(), pointOfSale, request.getInvoiceType());
+
+        GetLastAuthorizedInvoiceResponse response = new GetLastAuthorizedInvoiceResponse();
+        response.setIssuerCuit(request.getIssuerCuit());
+        response.setPointOfSale(request.getPointOfSale());
+        response.setInvoiceType(request.getInvoiceType());
+        response.setLastInvoiceNumber(lastInvoiceNumber);
+
+        return response;
+    }
+
+    // ─────────────────────────────────────────────
+    //  AUTHORIZATION FLOW
+    // ─────────────────────────────────────────────
+
+    private AuthorizeInvoiceResponse authorizeInTransaction(AuthorizeInvoiceRequest request) {
+
+        // Step 1 — a resent invoice gets its original CAE back instead of a new number
+        Optional<AuthorizedInvoice> alreadyAuthorized = findAlreadyAuthorized(request);
+
+        if (alreadyAuthorized.isPresent()) {
+            log.info("Invoice already authorized — externalInvoiceId: {} | number: {}",
+                    request.getExternalInvoiceId(), alreadyAuthorized.get().getInvoiceNumber());
+            return buildApprovedResponse(alreadyAuthorized.get(), ALREADY_AUTHORIZED_MESSAGE);
+        }
+
+        // Step 2 — validate the incoming invoice data
         List<InvoiceValidator.ValidationError> errors = invoiceValidator.validate(request);
 
-        // Step 2 — if there are errors, return a REJECTED response
+        // Step 3 — if there are errors, return a REJECTED response (nothing is registered)
         if (!errors.isEmpty()) {
             log.warn("Invoice rejected — externalInvoiceId: {} | errors: {}",
                     request.getExternalInvoiceId(), errors.size());
             return buildRejectedResponse(request, errors);
         }
 
-        // Step 3 — all validations passed, generate the CAE
-        String cae = generateCae();
-        long afipInvoiceNumber = generateAfipInvoiceNumber();
+        // Step 4 — assign the next number of the series, generate the CAE and register it
+        AuthorizedInvoice invoice = authorizedInvoiceRepository.save(
+                AuthorizedInvoice.builder()
+                        .externalInvoiceId(request.getExternalInvoiceId())
+                        .issuerCuit(request.getIssuer().getCuit())
+                        .pointOfSale(request.getPointOfSale().intValue())
+                        .invoiceType(request.getInvoiceType())
+                        .invoiceNumber(nextInvoiceNumber(request))
+                        .cae(generateCae())
+                        .caeExpirationDate(LocalDate.now().plusDays(CAE_VALIDITY_DAYS))
+                        .totalAmount(request.getTotalAmount())
+                        .authorizedAt(LocalDateTime.now())
+                        .build());
 
-        log.info("Invoice approved — externalInvoiceId: {} | CAE: {}",
-                request.getExternalInvoiceId(), cae);
+        log.info("Invoice approved — externalInvoiceId: {} | number: {} | CAE: {}",
+                request.getExternalInvoiceId(), invoice.getInvoiceNumber(), invoice.getCae());
 
-        return buildApprovedResponse(request, cae, afipInvoiceNumber);
+        return buildApprovedResponse(invoice, APPROVED_MESSAGE);
+    }
+
+    private Optional<AuthorizedInvoice> findAlreadyAuthorized(AuthorizeInvoiceRequest request) {
+        String externalInvoiceId = request.getExternalInvoiceId();
+
+        if (externalInvoiceId == null || externalInvoiceId.isBlank()) {
+            return Optional.empty();
+        }
+
+        return authorizedInvoiceRepository.findByExternalInvoiceId(externalInvoiceId);
     }
 
     // ─────────────────────────────────────────────
-    //  CAE GENERATION
+    //  NUMBERING & CAE GENERATION
     // ─────────────────────────────────────────────
+
+    /**
+     * Next correlative number of the series: issuer CUIT + point of sale + invoice type.
+     * The first invoice of a series gets number 1.
+     */
+    private long nextInvoiceNumber(AuthorizeInvoiceRequest request) {
+        return authorizedInvoiceRepository.findLastInvoiceNumber(
+                request.getIssuer().getCuit(),
+                request.getPointOfSale().intValue(),
+                request.getInvoiceType()) + 1;
+    }
 
     /**
      * Generates a fictional CAE code.
@@ -63,32 +156,21 @@ public class CaeGeneratorServiceImpl implements CaeGeneratorService {
         return String.valueOf(randomNumber);
     }
 
-    /**
-     * Generates a fictional AFIP invoice number.
-     * In production this would be a sequential number assigned by AFIP.
-     */
-    private long generateAfipInvoiceNumber() {
-        return ThreadLocalRandom.current().nextLong(1_000_000L, 9_999_999L);
-    }
-
     // ─────────────────────────────────────────────
     //  RESPONSE BUILDERS
     // ─────────────────────────────────────────────
 
-    private AuthorizeInvoiceResponse buildApprovedResponse(
-            AuthorizeInvoiceRequest request,
-            String cae,
-            long afipInvoiceNumber) {
+    private AuthorizeInvoiceResponse buildApprovedResponse(AuthorizedInvoice invoice, String message) {
 
         AuthorizeInvoiceResponse response = new AuthorizeInvoiceResponse();
 
-        response.setExternalInvoiceId(request.getExternalInvoiceId());
+        response.setExternalInvoiceId(invoice.getExternalInvoiceId());
         response.setStatus(AuthorizationStatus.APPROVED);
-        response.setCae(cae);
-        response.setCaeExpirationDate(toXmlDate(LocalDate.now().plusDays(10)));
-        response.setAfipInvoiceNumber(afipInvoiceNumber);
-        response.setMessage("Invoice authorized successfully by AFIP.");
-        response.setProcessedAt(toXmlDateTime(LocalDateTime.now()));
+        response.setCae(invoice.getCae());
+        response.setCaeExpirationDate(toXmlDate(invoice.getCaeExpirationDate()));
+        response.setAfipInvoiceNumber(invoice.getInvoiceNumber());
+        response.setMessage(message);
+        response.setProcessedAt(toXmlDateTime(invoice.getAuthorizedAt()));
 
         return response;
     }

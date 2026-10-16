@@ -7,6 +7,7 @@ import server.soap.afip.invoice.InvoiceItem;
 import server.soap.afip.invoice.VatRate;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -17,6 +18,10 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 public class InvoiceValidator {
+
+    private static final int[] CUIT_WEIGHTS = {5, 4, 3, 2, 7, 6, 5, 4, 3, 2};
+
+    private static final BigInteger MAX_POINT_OF_SALE = BigInteger.valueOf(99_999);
 
     /** VAT percentage for each rate of the XSD contract. */
     private static final Map<VatRate, BigDecimal> VAT_RATES = new EnumMap<>(Map.of(
@@ -54,6 +59,7 @@ public class InvoiceValidator {
         List<ValidationError> errors = new ArrayList<>();
 
         validateExternalInvoiceId(request, errors);
+        validatePointOfSale(request, errors);
         validateIssuer(request, errors);
         validateReceiver(request, errors);
         validateItems(request, errors);
@@ -82,6 +88,23 @@ public class InvoiceValidator {
         }
     }
 
+    /**
+     * Invoices are numbered per point of sale, so it is required (AFIP accepts 1 to 99999).
+     */
+    private void validatePointOfSale(AuthorizeInvoiceRequest request,
+                                     List<ValidationError> errors) {
+        BigInteger pointOfSale = request.getPointOfSale();
+
+        if (pointOfSale == null
+                || pointOfSale.compareTo(BigInteger.ONE) < 0
+                || pointOfSale.compareTo(MAX_POINT_OF_SALE) > 0) {
+            errors.add(new ValidationError(
+                    "ERR_024",
+                    "Point of sale is required and must be between 1 and 99999."
+            ));
+        }
+    }
+
     private void validateIssuer(AuthorizeInvoiceRequest request,
                                 List<ValidationError> errors) {
         if (request.getIssuer() == null) {
@@ -91,9 +114,11 @@ public class InvoiceValidator {
 
         if (isBlank(request.getIssuer().getCuit())) {
             errors.add(new ValidationError("ERR_003", "Issuer CUIT is required."));
-        } else if (!isValidCuit(request.getIssuer().getCuit())) {
+        } else if (!isValidCuitFormat(request.getIssuer().getCuit())) {
             errors.add(new ValidationError("ERR_004",
                     "Issuer CUIT format is invalid. Expected format: XX-XXXXXXXX-X"));
+        } else if (!hasValidCuitCheckDigit(request.getIssuer().getCuit())) {
+            errors.add(new ValidationError("ERR_022", "Issuer CUIT check digit is invalid."));
         }
 
         if (isBlank(request.getIssuer().getBusinessName())) {
@@ -110,9 +135,11 @@ public class InvoiceValidator {
 
         if (isBlank(request.getReceiver().getCuit())) {
             errors.add(new ValidationError("ERR_007", "Receiver CUIT is required."));
-        } else if (!isValidCuit(request.getReceiver().getCuit())) {
+        } else if (!isValidCuitFormat(request.getReceiver().getCuit())) {
             errors.add(new ValidationError("ERR_008",
                     "Receiver CUIT format is invalid. Expected format: XX-XXXXXXXX-X"));
+        } else if (!hasValidCuitCheckDigit(request.getReceiver().getCuit())) {
+            errors.add(new ValidationError("ERR_023", "Receiver CUIT check digit is invalid."));
         }
 
         if (isBlank(request.getReceiver().getBusinessName())) {
@@ -277,10 +304,33 @@ public class InvoiceValidator {
 
     /**
      * Validates Argentine CUIT format: XX-XXXXXXXX-X
-     * Example valid CUITs: 20-12345678-9 / 30-71234567-0
+     * Example valid CUITs: 20-12345678-6 / 30-71234567-1
      */
-    private boolean isValidCuit(String cuit) {
+    private boolean isValidCuitFormat(String cuit) {
         return cuit != null && cuit.matches("\\d{2}-\\d{8}-\\d{1}");
+    }
+
+    /**
+     * Validates the CUIT check digit (modulo 11), assuming the format is already valid.
+     *
+     * Each of the first 10 digits is multiplied by 5,4,3,2,7,6,5,4,3,2 and the products
+     * are added up. The check digit is 11 minus the remainder of dividing that sum by 11:
+     * 11 becomes 0, and 10 is impossible (AFIP never issues those CUITs).
+     */
+    private boolean hasValidCuitCheckDigit(String cuit) {
+        String digits = cuit.replace("-", "");
+
+        int sum = 0;
+        for (int i = 0; i < CUIT_WEIGHTS.length; i++) {
+            sum += Character.getNumericValue(digits.charAt(i)) * CUIT_WEIGHTS[i];
+        }
+
+        int expected = 11 - (sum % 11);
+        if (expected == 11) {
+            expected = 0;
+        }
+
+        return expected != 10 && expected == Character.getNumericValue(digits.charAt(10));
     }
 
     private boolean isBlank(String value) {

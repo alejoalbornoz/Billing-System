@@ -14,6 +14,10 @@ FROM eclipse-temurin:17-jre
 WORKDIR /app
 
 RUN groupadd --system spring && useradd --system --gid spring spring
+
+# H2 registry of authorized invoices (mounted as a volume in docker compose)
+RUN mkdir -p /app/data && chown spring:spring /app/data
+
 USER spring
 
 COPY --from=build /app/target/*.jar app.jar

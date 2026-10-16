@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -111,6 +112,81 @@ class InvoiceValidatorTest {
         List<InvoiceValidator.ValidationError> errors = validator.validate(request);
 
         assertThat(errors).extracting("code").contains("ERR_008");
+    }
+
+    // ─────────────────────────────────────────────
+    //  CUIT CHECK DIGIT (MODULO 11)
+    // ─────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Should return ERR_022 when issuer CUIT has a wrong check digit")
+    void shouldReturnErr022_whenIssuerCuitCheckDigitIsWrong() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        request.getIssuer().setCuit("30-71234567-0"); // valid check digit is 1
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").containsExactly("ERR_022");
+    }
+
+    @Test
+    @DisplayName("Should return ERR_023 when receiver CUIT has a wrong check digit")
+    void shouldReturnErr023_whenReceiverCuitCheckDigitIsWrong() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        request.getReceiver().setCuit("20-12345678-9"); // valid check digit is 6
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").containsExactly("ERR_023");
+    }
+
+    @Test
+    @DisplayName("Should accept a CUIT whose check digit is 0 (11 - remainder = 11)")
+    void shouldAcceptCuit_whenCheckDigitIsZero() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        request.getReceiver().setCuit("20-10000013-0");
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).isEmpty();
+    }
+
+    @Test
+    @DisplayName("Should reject a CUIT whose check digit would be 10, which AFIP never issues")
+    void shouldRejectCuit_whenCheckDigitWouldBeTen() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+
+        for (int digit = 0; digit <= 9; digit++) {
+            request.getReceiver().setCuit("20-10000005-" + digit);
+
+            assertThat(validator.validate(request)).extracting("code").containsExactly("ERR_023");
+        }
+    }
+
+    // ─────────────────────────────────────────────
+    //  POINT OF SALE
+    // ─────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Should return ERR_024 when point of sale is missing")
+    void shouldReturnErr024_whenPointOfSaleIsMissing() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        request.setPointOfSale(null);
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").containsExactly("ERR_024");
+    }
+
+    @Test
+    @DisplayName("Should return ERR_024 when point of sale is out of range")
+    void shouldReturnErr024_whenPointOfSaleIsOutOfRange() {
+        server.soap.afip.invoice.AuthorizeInvoiceRequest request = buildValidRequest();
+        request.setPointOfSale(BigInteger.valueOf(100_000));
+
+        List<InvoiceValidator.ValidationError> errors = validator.validate(request);
+
+        assertThat(errors).extracting("code").containsExactly("ERR_024");
     }
 
     // ─────────────────────────────────────────────
@@ -268,14 +344,15 @@ class InvoiceValidatorTest {
         server.soap.afip.invoice.AuthorizeInvoiceRequest request = new server.soap.afip.invoice.AuthorizeInvoiceRequest();
         request.setExternalInvoiceId("test-uuid-1234");
         request.setInvoiceType(server.soap.afip.invoice.InvoiceType.INVOICE_B);
+        request.setPointOfSale(BigInteger.ONE);
 
         server.soap.afip.invoice.TaxpayerInfo issuer = new server.soap.afip.invoice.TaxpayerInfo();
-        issuer.setCuit("30-71234567-0");
+        issuer.setCuit("30-71234567-1");
         issuer.setBusinessName("Mi Empresa SRL");
         request.setIssuer(issuer);
 
         server.soap.afip.invoice.TaxpayerInfo receiver = new server.soap.afip.invoice.TaxpayerInfo();
-        receiver.setCuit("20-12345678-9");
+        receiver.setCuit("20-12345678-6");
         receiver.setBusinessName("Cliente SA");
         request.setReceiver(receiver);
 
